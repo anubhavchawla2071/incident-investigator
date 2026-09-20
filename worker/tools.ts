@@ -141,7 +141,11 @@ export function runInvestigationTool(
 
 function searchLogs(environment: SimulatedProductionEnvironment, input: SearchLogsInput): SearchLogsResult {
 	const limit = boundedLimit(input.limit);
-	const queryTerms = input.query?.toLowerCase().trim().split(/\s+/).filter(Boolean) ?? [];
+	const queryTerms = input.query
+		?.toLowerCase()
+		.trim()
+		.split(/\s+/)
+		.filter((term) => term && !(input.level === "error" && term === "error")) ?? [];
 	const logs = environment.logs
 		.filter((log) => matchesOptional(log.service, input.service))
 		.filter((log) => matchesOptional(log.region, input.region))
