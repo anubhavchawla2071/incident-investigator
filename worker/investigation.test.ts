@@ -81,7 +81,7 @@ describe("investigation coordinator", () => {
 	});
 
 	it("stops at six tool calls and asks the model for a final report", async () => {
-		const store = new MemoryInvestigationStore("limit-incident", "The API is returning 500 errors.");
+		const store = new MemoryInvestigationStore("limit-incident", "Customers report an unspecified issue.");
 		let finalReportRequested = false;
 		const model: InvestigationModel = {
 			decide: async ({ finalReportRequired }) => {
@@ -232,7 +232,7 @@ describe("investigation coordinator", () => {
 		expect(store.toolRuns.map((toolRun) => [toolRun.toolName, toolRun.input])).toEqual([
 			["getServiceHealth", {}],
 			["getMetrics", { service: "checkout-api", region: "us-east-1", metric: "http.server.error_rate" }],
-			["searchLogs", { service: "checkout-api", region: "us-east-1", level: "error", query: "500", limit: 10 }],
+			["searchLogs", { service: "checkout-api", region: "us-east-1", level: "error", limit: 10 }],
 			["getTrace", { traceId: "trace-checkout-500-01" }],
 			["getRecentDeployments", { service: "cart-service", region: "us-east-1", limit: 3 }],
 		]);
@@ -241,8 +241,54 @@ describe("investigation coordinator", () => {
 		expect(finalReportRequested).toBe(true);
 	});
 
+	it("keeps a payments investigation scoped to payments evidence", async () => {
+		const store = new MemoryInvestigationStore("payments-incident", "Payments are timing out during confirmation.");
+		let calls = 0;
+		const model: InvestigationModel = {
+			decide: async ({ finalReportRequired }) => {
+				if (finalReportRequired) {
+					return {
+						kind: "report",
+						report: {
+							outcome: "resolved",
+							diagnosis: "Payments are timing out while acquiring database connections.",
+							rootCause: "The payments primary database pool is exhausted.",
+							confidence: 0.9,
+							suggestedNextSteps: ["Roll back or mitigate the payments deployment."],
+							evidenceToolRunIds: store.toolRuns.map((toolRun) => toolRun.id),
+						},
+					};
+				}
+				calls += 1;
+				return {
+					kind: "tool",
+					request:
+						calls === 1
+							? { tool: "getMetrics", input: { service: "checkout-api", region: "us-east-1", metric: "http.server.error_rate" } }
+							: { tool: "searchLogs", input: { service: "checkout-api", region: "us-east-1", level: "error" } },
+				};
+			},
+		};
+
+		const result = await runInvestigation({
+			incidentId: "payments-incident",
+			model,
+			store,
+			steps: directSteps,
+		});
+
+		expect(result.status).toBe("resolved");
+		expect(store.toolRuns.map((toolRun) => [toolRun.toolName, toolRun.input])).toEqual([
+			["getServiceHealth", {}],
+			["getMetrics", { service: "payments-service", region: "us-east-1", metric: "db.pool.active_connections" }],
+			["searchLogs", { service: "payments-service", region: "us-east-1", level: "error", limit: 10 }],
+			["getTrace", { traceId: "trace-payment-slow-01" }],
+			["getRecentDeployments", { service: "payments-service", region: "us-east-1", limit: 3 }],
+		]);
+	});
+
 	it("records a controlled policy result when Llama invents a trace id before any trace id is observed", async () => {
-		const store = new MemoryInvestigationStore("invented-trace-incident", "Checkout API is returning 500 errors.");
+		const store = new MemoryInvestigationStore("invented-trace-incident", "Something is odd in production.");
 		let calls = 0;
 		const model: InvestigationModel = {
 			decide: async () => {
