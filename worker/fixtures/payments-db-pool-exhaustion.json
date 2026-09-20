@@ -1,0 +1,108 @@
+{
+  "logs": [
+    {
+      "id": "log-payments-001",
+      "timestamp": "2026-09-20T14:01:22Z",
+      "service": "payments-service",
+      "region": "us-east-1",
+      "level": "error",
+      "message": "timed out acquiring database connection",
+      "attributes": { "pool": "primary", "waitMs": 30000, "traceId": "trace-payment-slow-01" }
+    },
+    {
+      "id": "log-payments-002",
+      "timestamp": "2026-09-20T14:00:53Z",
+      "service": "payments-service",
+      "region": "us-east-1",
+      "level": "warn",
+      "message": "fraud decision retrying after timeout",
+      "attributes": { "attempt": 2, "traceId": "trace-payment-slow-01" }
+    },
+    {
+      "id": "log-payments-003",
+      "timestamp": "2026-09-20T13:40:11Z",
+      "service": "fraud-service",
+      "region": "us-east-1",
+      "level": "info",
+      "message": "fraud decision completed",
+      "attributes": { "latencyMs": 91, "statusCode": 200 }
+    }
+  ],
+  "metrics": [
+    {
+      "service": "payments-service",
+      "region": "us-east-1",
+      "name": "db.pool.active_connections",
+      "unit": "connections",
+      "points": [
+        { "timestamp": "2026-09-20T13:35:00Z", "value": 24 },
+        { "timestamp": "2026-09-20T13:55:00Z", "value": 96 },
+        { "timestamp": "2026-09-20T14:05:00Z", "value": 100 }
+      ]
+    },
+    {
+      "service": "payments-service",
+      "region": "us-east-1",
+      "name": "http.server.p95_duration",
+      "unit": "milliseconds",
+      "points": [
+        { "timestamp": "2026-09-20T13:35:00Z", "value": 320 },
+        { "timestamp": "2026-09-20T13:55:00Z", "value": 28100 },
+        { "timestamp": "2026-09-20T14:05:00Z", "value": 30000 }
+      ]
+    },
+    {
+      "service": "fraud-service",
+      "region": "us-east-1",
+      "name": "http.server.p95_duration",
+      "unit": "milliseconds",
+      "points": [
+        { "timestamp": "2026-09-20T13:55:00Z", "value": 110 },
+        { "timestamp": "2026-09-20T14:05:00Z", "value": 124 }
+      ]
+    }
+  ],
+  "traces": [
+    {
+      "id": "trace-payment-slow-01",
+      "region": "us-east-1",
+      "rootService": "payments-service",
+      "startedAt": "2026-09-20T14:00:22Z",
+      "durationMs": 30144,
+      "status": "error",
+      "spans": [
+        { "spanId": "span-10", "parentSpanId": null, "service": "payments-service", "operation": "POST /payments/confirm", "durationMs": 30144, "status": "error", "attributes": { "httpStatus": 503 } },
+        { "spanId": "span-11", "parentSpanId": "span-10", "service": "fraud-service", "operation": "POST /decision", "durationMs": 2200, "status": "ok", "attributes": { "retryAttempt": 2 } },
+        { "spanId": "span-12", "parentSpanId": "span-10", "service": "payments-service", "operation": "acquire primary database connection", "durationMs": 30000, "status": "error", "attributes": { "errorType": "pool_timeout" } }
+      ]
+    }
+  ],
+  "deployments": [
+    {
+      "id": "dep-payments-470",
+      "service": "payments-service",
+      "version": "4.7.0",
+      "region": "us-east-1",
+      "completedAt": "2026-09-20T13:42:00Z",
+      "status": "succeeded",
+      "summary": "Improve authorization audit consistency during fraud retries.",
+      "changes": ["Move fraud retry handling into authorization transaction.", "Add retry audit metadata."]
+    }
+  ],
+  "serviceHealth": [
+    {
+      "service": "payments-service",
+      "region": "us-east-1",
+      "status": "degraded",
+      "observedAt": "2026-09-20T14:05:00Z",
+      "checks": [ { "name": "database-pool", "status": "unhealthy", "detail": "100 of 100 primary connections in use" } ]
+    },
+    {
+      "service": "fraud-service",
+      "region": "us-east-1",
+      "status": "healthy",
+      "observedAt": "2026-09-20T14:05:00Z",
+      "checks": [ { "name": "request-latency", "status": "healthy", "detail": "p95 latency below 150 milliseconds" } ]
+    }
+  ]
+}

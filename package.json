@@ -7,6 +7,7 @@
     "dev": "vite dev",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
+    "test": "vitest run",
     "deploy": "npm run build && wrangler deploy --env production",
     "cf-typegen": "wrangler types",
     "db:migrate:local": "wrangler d1 migrations apply incident-investigator --local",
@@ -24,6 +25,7 @@
     "@vitejs/plugin-react": "^5.0.4",
     "typescript": "^5.8.3",
     "vite": "^7.0.0",
+    "vitest": "^3.2.7",
     "wrangler": "^4.0.0"
   }
 }

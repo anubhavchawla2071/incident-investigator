@@ -27,6 +27,26 @@ Verify that the four application tables exist:
 npm run db:verify:local
 ```
 
+## Simulated production data
+
+The Worker combines three JSON fixture files into one deterministic simulated production environment. They contain separate logs, metrics, traces, recent deployments, and service-health observations—never a stored root-cause field or a user-selectable scenario.
+
+The data includes clues for checkout 500s, payment failures caused by database connection pressure, and European order timeouts. It is internal observability data: the user only describes what they see, and the future LLM decides which tools to call.
+
+The investigation tool layer is in `worker/tools.ts`. It exposes five small operations that will later be supplied to the LLM:
+
+- `searchLogs` searches across the environment by service, region, query text, and time range.
+- `getMetrics` returns a requested metric series for a service and optional region.
+- `getServiceHealth` returns a compact degraded-service overview with no filters, or filtered health checks when a service or region is supplied.
+- `getRecentDeployments` returns recent deployments across the environment, newest first.
+- `getTrace` returns one trace by ID.
+
+Run the fixture and tool tests with:
+
+```sh
+npm test
+```
+
 ## Before deployment
 
 Create a D1 database and replace both placeholder `database_id` values in `wrangler.jsonc` with the identifier returned by Wrangler:

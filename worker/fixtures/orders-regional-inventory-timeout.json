@@ -1,0 +1,106 @@
+{
+  "logs": [
+    {
+      "id": "log-orders-001",
+      "timestamp": "2026-09-20T08:18:11Z",
+      "service": "orders-api",
+      "region": "eu-west-1",
+      "level": "error",
+      "message": "inventory reservation request timed out",
+      "attributes": { "upstream": "inventory-service", "timeoutMs": 5000, "traceId": "trace-order-timeout-01" }
+    },
+    {
+      "id": "log-orders-002",
+      "timestamp": "2026-09-20T08:18:06Z",
+      "service": "orders-api",
+      "region": "eu-west-1",
+      "level": "warn",
+      "message": "inventory client selected endpoint",
+      "attributes": { "endpoint": "inventory-us.internal", "traceId": "trace-order-timeout-01" }
+    },
+    {
+      "id": "log-orders-003",
+      "timestamp": "2026-09-20T08:19:02Z",
+      "service": "inventory-service",
+      "region": "eu-west-1",
+      "level": "info",
+      "message": "inventory reservation completed",
+      "attributes": { "latencyMs": 42, "statusCode": 201 }
+    }
+  ],
+  "metrics": [
+    {
+      "service": "orders-api",
+      "region": "eu-west-1",
+      "name": "http.server.p95_duration",
+      "unit": "milliseconds",
+      "points": [
+        { "timestamp": "2026-09-20T08:05:00Z", "value": 410 },
+        { "timestamp": "2026-09-20T08:20:00Z", "value": 5120 },
+        { "timestamp": "2026-09-20T08:35:00Z", "value": 5080 }
+      ]
+    },
+    {
+      "service": "orders-api",
+      "region": "us-east-1",
+      "name": "http.server.p95_duration",
+      "unit": "milliseconds",
+      "points": [
+        { "timestamp": "2026-09-20T08:20:00Z", "value": 380 },
+        { "timestamp": "2026-09-20T08:35:00Z", "value": 395 }
+      ]
+    },
+    {
+      "service": "inventory-service",
+      "region": "eu-west-1",
+      "name": "http.server.p95_duration",
+      "unit": "milliseconds",
+      "points": [
+        { "timestamp": "2026-09-20T08:20:00Z", "value": 46 },
+        { "timestamp": "2026-09-20T08:35:00Z", "value": 44 }
+      ]
+    }
+  ],
+  "traces": [
+    {
+      "id": "trace-order-timeout-01",
+      "region": "eu-west-1",
+      "rootService": "orders-api",
+      "startedAt": "2026-09-20T08:18:06Z",
+      "durationMs": 5058,
+      "status": "error",
+      "spans": [
+        { "spanId": "span-20", "parentSpanId": null, "service": "orders-api", "operation": "POST /orders", "durationMs": 5058, "status": "error", "attributes": { "httpStatus": 504 } },
+        { "spanId": "span-21", "parentSpanId": "span-20", "service": "orders-api", "operation": "POST inventory reservation", "durationMs": 5000, "status": "error", "attributes": { "peer": "inventory-us.internal", "errorType": "connect_timeout" } }
+      ]
+    }
+  ],
+  "deployments": [
+    {
+      "id": "dep-orders-9120",
+      "service": "orders-api",
+      "version": "9.12.0",
+      "region": "eu-west-1",
+      "completedAt": "2026-09-20T08:11:00Z",
+      "status": "succeeded",
+      "summary": "Use regional inventory endpoint configuration.",
+      "changes": ["Switch inventory client to region-derived endpoint.", "Remove legacy endpoint fallback."]
+    }
+  ],
+  "serviceHealth": [
+    {
+      "service": "orders-api",
+      "region": "eu-west-1",
+      "status": "degraded",
+      "observedAt": "2026-09-20T08:35:00Z",
+      "checks": [ { "name": "upstream-latency", "status": "degraded", "detail": "inventory client timeouts above threshold" } ]
+    },
+    {
+      "service": "inventory-service",
+      "region": "eu-west-1",
+      "status": "healthy",
+      "observedAt": "2026-09-20T08:35:00Z",
+      "checks": [ { "name": "reservation-handler", "status": "healthy", "detail": "p95 latency below 50 milliseconds" } ]
+    }
+  ]
+}
