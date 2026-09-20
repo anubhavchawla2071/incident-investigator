@@ -7,11 +7,15 @@
   "assets": {
     "not_found_handling": "single-page-application"
   },
+  "ai": {
+    "binding": "AI",
+    "remote": true
+  },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "incident-investigator",
-      "database_id": "00000000-0000-0000-0000-000000000000"
+      "database_id": "8fc16444-232e-4a86-8c35-986017242386"
     }
   ],
   "workflows": [
@@ -31,7 +35,7 @@
         {
           "binding": "DB",
           "database_name": "incident-investigator",
-          "database_id": "00000000-0000-0000-0000-000000000000"
+          "database_id": "8fc16444-232e-4a86-8c35-986017242386"
         }
       ],
       "workflows": [
