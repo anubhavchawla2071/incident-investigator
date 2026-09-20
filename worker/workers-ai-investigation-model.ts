@@ -16,7 +16,7 @@ export interface WorkersAiBinding {
 
 interface WorkersAiRequest {
 	messages: Array<{ role: "system" | "user"; content: string }>;
-	tools: ToolDefinition[];
+	tools?: ToolDefinition[];
 	temperature: number;
 	max_tokens: number;
 }
@@ -40,16 +40,20 @@ export class WorkersAiInvestigationModel implements InvestigationModel {
 	constructor(private readonly ai: WorkersAiBinding) {}
 
 	async decide(input: { symptom: string; toolRuns: StoredToolRun[]; finalReportRequired?: boolean }): Promise<ModelDecision> {
+		const request: WorkersAiRequest = {
+			messages: [
+				{ role: "system", content: investigationSystemPrompt },
+				{ role: "user", content: JSON.stringify(toModelContext(input)) },
+			],
+			temperature: 0.1,
+			max_tokens: 900,
+		};
+		if (!input.finalReportRequired) {
+			request.tools = investigationToolSchemas;
+		}
+
 		const response = asResponse(
-			await this.ai.run(INVESTIGATION_MODEL, {
-				messages: [
-					{ role: "system", content: investigationSystemPrompt },
-					{ role: "user", content: JSON.stringify(toModelContext(input)) },
-				],
-				tools: investigationToolSchemas,
-				temperature: 0.1,
-				max_tokens: 900,
-			}),
+			await this.ai.run(INVESTIGATION_MODEL, request),
 		);
 
 		if (response.tool_calls?.length) {

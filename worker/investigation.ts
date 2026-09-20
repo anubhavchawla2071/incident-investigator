@@ -73,7 +73,7 @@ export interface InvestigationResult {
 
 type RunnableToolRequest = InvestigationToolRequest & { policyResult?: InvestigationToolResult };
 
-const MAX_TOOL_CALLS = 10;
+const MAX_TOOL_CALLS = 6;
 
 export async function runInvestigation({
 	incidentId,
@@ -102,7 +102,7 @@ export async function runInvestigation({
 
 		while (true) {
 			const toolRuns = await store.listToolRuns(incidentId);
-			if (toolRuns.length >= MAX_TOOL_CALLS) {
+			if (toolRuns.length >= MAX_TOOL_CALLS || hasSufficientCheckoutEvidence(symptom, toolRuns)) {
 				const finalDecision = await steps.do("write report from collected evidence", () =>
 					model.decide({ symptom, toolRuns, finalReportRequired: true }),
 				);
@@ -323,6 +323,40 @@ function nextFocusedRequest(focus: InvestigationFocus, toolRuns: StoredToolRun[]
 	return null;
 }
 
+function hasSufficientCheckoutEvidence(symptom: string, toolRuns: StoredToolRun[]) {
+	const focus = focusedService(symptom, toolRuns);
+	if (focus?.symptom !== "checkout-500s" || !hasMetricRun(toolRuns, focus.service, focus.region, "http.server.error_rate")) {
+		return false;
+	}
+
+	const checkoutLogs = toolRuns.find(
+		(toolRun) =>
+			toolRun.toolName === "searchLogs" &&
+			isRecord(toolRun.input) &&
+			toolRun.input.service === focus.service &&
+			toolRun.input.region === focus.region &&
+			toolRun.status === "succeeded" &&
+			toolRun.output &&
+			!isPolicyResult(toolRun.output),
+	);
+	const upstreamService = checkoutLogs ? upstreamServiceFrom(checkoutLogs.output) : null;
+	const traceId = checkoutLogs ? traceIdFrom(checkoutLogs.output) : null;
+	if (!upstreamService || !traceId) return false;
+
+	const traceRun = toolRuns.find(
+		(toolRun) =>
+			toolRun.toolName === "getTrace" &&
+			isRecord(toolRun.input) &&
+			toolRun.input.traceId === traceId &&
+			toolRun.status === "succeeded" &&
+			toolRun.output &&
+			!isPolicyResult(toolRun.output),
+	);
+	if (!traceRun || !JSON.stringify(traceRun.output).includes(upstreamService)) return false;
+
+	return hasToolRun(toolRuns, "getRecentDeployments", upstreamService, focus.region);
+}
+
 function shouldUseRecommendation(
 	request: InvestigationToolRequest,
 	recommended: InvestigationToolRequest,
@@ -448,7 +482,16 @@ function firstUninspectedTraceId(toolRuns: StoredToolRun[]) {
 
 function observedUpstreamService(toolRuns: StoredToolRun[]) {
 	const output = JSON.stringify(successfulEvidenceOutputs(toolRuns));
+	return upstreamServiceFrom(output);
+}
+
+function upstreamServiceFrom(value: unknown) {
+	const output = typeof value === "string" ? value : JSON.stringify(value);
 	return output.match(/"upstream":"([^"]+)"/)?.[1] ?? output.match(/"service":"((?!checkout-api)[^"]+)"/)?.[1] ?? null;
+}
+
+function traceIdFrom(value: unknown) {
+	return JSON.stringify(value).match(/"traceId":"([^"]+)"/)?.[1] ?? null;
 }
 
 function successfulEvidenceOutputs(toolRuns: StoredToolRun[]) {

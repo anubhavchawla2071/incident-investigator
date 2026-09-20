@@ -80,7 +80,7 @@ describe("investigation coordinator", () => {
 		expect(store.incident.status).toBe("failed");
 	});
 
-	it("stops at ten tool calls and asks the model for a final report", async () => {
+	it("stops at six tool calls and asks the model for a final report", async () => {
 		const store = new MemoryInvestigationStore("limit-incident", "The API is returning 500 errors.");
 		let finalReportRequested = false;
 		const model: InvestigationModel = {
@@ -111,7 +111,7 @@ describe("investigation coordinator", () => {
 		});
 
 		expect(result.status).toBe("inconclusive");
-		expect(store.toolRuns).toHaveLength(10);
+		expect(store.toolRuns).toHaveLength(6);
 		expect(finalReportRequested).toBe(true);
 		expect(store.report?.outcome).toBe("inconclusive");
 		expect(store.report?.evidenceToolRunIds).toEqual(store.toolRuns.map((toolRun) => toolRun.id));
@@ -178,8 +178,10 @@ describe("investigation coordinator", () => {
 	it("keeps a checkout investigation focused when Llama wanders to unrelated or empty tools", async () => {
 		const store = new MemoryInvestigationStore("focused-incident", "Checkout API is returning 500 errors in us-east-1. Can you investigate what changed?");
 		let calls = 0;
+		let finalReportRequested = false;
 		const model: InvestigationModel = {
-			decide: async () => {
+			decide: async ({ finalReportRequired }) => {
+				if (finalReportRequired) finalReportRequested = true;
 				calls += 1;
 				if (calls === 1) {
 					return {
@@ -236,6 +238,7 @@ describe("investigation coordinator", () => {
 		]);
 		expect(JSON.stringify(store.toolRuns.slice(1).map((toolRun) => toolRun.output))).not.toContain("payments-service");
 		expect(JSON.stringify(store.toolRuns.map((toolRun) => toolRun.output))).not.toContain("9638c880");
+		expect(finalReportRequested).toBe(true);
 	});
 
 	it("records a controlled policy result when Llama invents a trace id before any trace id is observed", async () => {
