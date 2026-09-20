@@ -75,12 +75,20 @@ export interface GetTraceResult {
 	trace: Trace | null;
 }
 
+export interface ToolPolicyResult {
+	policy: {
+		status: "rejected";
+		reason: string;
+	};
+}
+
 export type InvestigationToolResult =
 	| SearchLogsResult
 	| GetMetricsResult
 	| GetServiceHealthResult
 	| GetRecentDeploymentsResult
-	| GetTraceResult;
+	| GetTraceResult
+	| ToolPolicyResult;
 
 export const investigationTools: Array<{ name: ToolName; description: string }> = [
 	{ name: "searchLogs", description: "Search logs in the simulated production environment." },
@@ -95,6 +103,8 @@ export const allowedMetricNames = [
 	"http.server.p95_duration",
 	"db.pool.active_connections",
 ] as const;
+
+export const availableMetricsByService = metricCatalog();
 
 export function runInvestigationTool(
 	request: Extract<InvestigationToolRequest, { tool: "searchLogs" }>,
@@ -208,4 +218,20 @@ function searchableLogText(log: LogEntry) {
 
 function boundedLimit(limit: number | undefined) {
 	return Math.max(1, Math.min(limit ?? 50, 100));
+}
+
+function metricCatalog() {
+	const metrics = new Map<string, Set<string>>();
+	for (const metric of simulatedProductionEnvironment.metrics) {
+		const key = `${metric.service}:${metric.region}`;
+		const names = metrics.get(key) ?? new Set<string>();
+		names.add(metric.name);
+		metrics.set(key, names);
+	}
+	return Array.from(metrics.entries())
+		.map(([key, names]) => {
+			const [service, region] = key.split(":");
+			return { service, region, metrics: Array.from(names).sort() };
+		})
+		.sort((left, right) => `${left.service}:${left.region}`.localeCompare(`${right.service}:${right.region}`));
 }

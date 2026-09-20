@@ -6,7 +6,7 @@ import type {
 	StoredToolRun,
 } from "./investigation";
 import { serviceCatalog } from "./service-catalog";
-import { allowedMetricNames } from "./tools";
+import { allowedMetricNames, availableMetricsByService } from "./tools";
 
 export const INVESTIGATION_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 
@@ -71,7 +71,12 @@ const investigationSystemPrompt = `You are an incident investigator. Your only e
 
 Choose exactly one next investigation tool when more evidence is needed. Do not diagnose from one isolated signal. Gather corroborating evidence appropriate to the hypothesis, but do not use a fixed tool count. The orchestrator already starts every investigation with getServiceHealth and enforces the overall call limit.
 
-For getMetrics, use only these exact metric names: ${allowedMetricNames.join(", ")}.
+Investigation policy:
+- Keep the investigation focused on the user-reported service, region, and symptom. Do not jump to another degraded service from the health overview unless the symptom or prior tool evidence connects that service.
+- For checkout 500s, after checkout http.server.error_rate is confirmed, search checkout logs for errors before requesting more metrics.
+- Call getTrace only with a traceId that appeared in completed tool results. Never invent trace IDs.
+- If logs or traces show an upstream service, you may inspect that upstream service's trace or recent deployments.
+- For getMetrics, use only metric names that are listed for that service and region in availableMetricsByService.
 
 When evidence is sufficient, return only a JSON object with this shape: {"outcome":"resolved"|"inconclusive","diagnosis":"string","rootCause":"string","confidence":number from 0 to 1,"suggestedNextSteps":["string"],"evidenceToolRunIds":["tool run id"]}. Cite only IDs from completed tool results. If evidence is insufficient, return outcome "inconclusive" instead of guessing.`;
 
@@ -83,6 +88,7 @@ const investigationToolSchemas: ToolDefinition[] = [
 			service: stringSchema("Service name from the catalog."),
 			region: stringSchema("Cloud region."),
 			query: stringSchema("Words to match in a log message or attributes."),
+			level: stringSchema("Optional log level: debug, info, warn, or error."),
 			start: stringSchema("Inclusive ISO timestamp."),
 			end: stringSchema("Inclusive ISO timestamp."),
 			limit: { type: "number", description: "Maximum entries to return." },
@@ -123,6 +129,7 @@ function toModelContext({ symptom, toolRuns }: { symptom: string; toolRuns: Stor
 		reportedSymptom: symptom,
 		serviceCatalog,
 		availableMetrics: allowedMetricNames,
+		availableMetricsByService,
 		completedToolResults: toolRuns
 			.filter((toolRun) => toolRun.status === "succeeded")
 			.map((toolRun) => ({

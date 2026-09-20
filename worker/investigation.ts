@@ -7,6 +7,7 @@ import {
 	type InvestigationToolRequest,
 	type InvestigationToolResult,
 	allowedMetricNames,
+	availableMetricsByService,
 	type SearchLogsInput,
 	type ToolName,
 } from "./tools";
@@ -69,6 +70,8 @@ export interface InvestigationResult {
 	error?: string;
 }
 
+type RunnableToolRequest = InvestigationToolRequest & { policyResult?: InvestigationToolResult };
+
 const MAX_TOOL_CALLS = 6;
 
 export async function runInvestigation({
@@ -114,7 +117,11 @@ export async function runInvestigation({
 				return { status: report.outcome, report };
 			}
 
-			const request = parseToolRequest(decision.request);
+			const request = applyInvestigationPolicy({
+				symptom,
+				toolRuns,
+				request: parseToolRequest(decision.request),
+			});
 			await steps.do(`run ${request.tool} ${toolRuns.length + 1}`, () =>
 				coordinator.runTool(request, toolRuns.length),
 			);
@@ -136,7 +143,7 @@ class InvestigationCoordinator {
 		private readonly store: InvestigationStore,
 	) {}
 
-	async runTool(request: InvestigationToolRequest, ordinal: number): Promise<StoredToolRun> {
+	async runTool(request: RunnableToolRequest, ordinal: number): Promise<StoredToolRun> {
 		const toolRunId = `${this.incidentId}:tool:${ordinal + 1}`;
 		await this.store.setActivity(this.incidentId, activityForTool(request.tool));
 
@@ -158,7 +165,7 @@ class InvestigationCoordinator {
 			return toolRun;
 		}
 
-		const output = runInvestigationTool(request);
+		const output = request.policyResult ?? runInvestigationTool(request);
 		return this.store.completeToolRun(toolRunId, output);
 	}
 
@@ -215,6 +222,238 @@ function validateReportDraft(draft: InvestigationReportDraft) {
 	) {
 		throw new EvidenceValidationError("Final report has an invalid structure or evidence list.");
 	}
+}
+
+function applyInvestigationPolicy({
+	symptom,
+	toolRuns,
+	request,
+}: {
+	symptom: string;
+	toolRuns: StoredToolRun[];
+	request: InvestigationToolRequest;
+}): RunnableToolRequest {
+	if (hasExactToolRun(toolRuns, request)) {
+		return withPolicyResult(request, `Duplicate tool call rejected: ${request.tool} was already run with the same input.`);
+	}
+
+	const focus = focusedService(symptom, toolRuns);
+	const recommended = focus ? nextFocusedRequest(focus, toolRuns) : null;
+	if (focus && recommended && shouldUseRecommendation(request, recommended, focus, toolRuns)) {
+		return recommended;
+	}
+
+	if (request.tool === "getMetrics" && !metricExists(request.input.service, request.input.region, request.input.metric)) {
+		return recommended ?? withPolicyResult(
+			request,
+			`Metric ${request.input.metric} is not available for ${request.input.service}${request.input.region ? ` in ${request.input.region}` : ""}.`,
+		);
+	}
+
+	if (request.tool === "getTrace") {
+		const traceIds = observedTraceIds(toolRuns);
+		if (traceIds.has(request.input.traceId)) {
+			return request;
+		}
+		const [firstTraceId] = traceIds;
+		return firstTraceId
+			? { tool: "getTrace", input: { traceId: firstTraceId } }
+			: withPolicyResult(request, `Trace ID ${request.input.traceId} was rejected because it has not appeared in prior tool results.`);
+	}
+
+	return request;
+}
+
+interface InvestigationFocus {
+	service: string;
+	region?: string;
+	symptom: "checkout-500s" | "payments" | "orders" | "unknown";
+}
+
+function focusedService(symptom: string, toolRuns: StoredToolRun[]): InvestigationFocus | null {
+	const lowerSymptom = symptom.toLowerCase();
+	const healthText = JSON.stringify(toolRuns.find((toolRun) => toolRun.toolName === "getServiceHealth")?.output ?? {}).toLowerCase();
+
+	if (/checkout|500|5xx/.test(lowerSymptom) && healthText.includes("checkout-api")) {
+		return { service: "checkout-api", region: mentionedRegion(lowerSymptom) ?? "us-east-1", symptom: "checkout-500s" };
+	}
+	if (/payments?|charge|database|connection/.test(lowerSymptom) && healthText.includes("payments-service")) {
+		return { service: "payments-service", region: mentionedRegion(lowerSymptom) ?? "us-east-1", symptom: "payments" };
+	}
+	if (/orders?/.test(lowerSymptom) && healthText.includes("orders-api")) {
+		return { service: "orders-api", region: mentionedRegion(lowerSymptom) ?? "eu-west-1", symptom: "orders" };
+	}
+
+	return null;
+}
+
+function nextFocusedRequest(focus: InvestigationFocus, toolRuns: StoredToolRun[]): InvestigationToolRequest | null {
+	if (focus.symptom === "checkout-500s") {
+		if (!hasMetricRun(toolRuns, focus.service, focus.region, "http.server.error_rate")) {
+			return {
+				tool: "getMetrics",
+				input: { service: focus.service, region: focus.region, metric: "http.server.error_rate" },
+			};
+		}
+		if (!hasToolRun(toolRuns, "searchLogs", focus.service, focus.region)) {
+			return {
+				tool: "searchLogs",
+				input: { service: focus.service, region: focus.region, level: "error", query: "500", limit: 10 },
+			};
+		}
+		const traceId = firstUninspectedTraceId(toolRuns);
+		if (traceId) {
+			return { tool: "getTrace", input: { traceId } };
+		}
+		const upstreamService = observedUpstreamService(toolRuns);
+		if (upstreamService && !hasToolRun(toolRuns, "getRecentDeployments", upstreamService, focus.region)) {
+			return {
+				tool: "getRecentDeployments",
+				input: { service: upstreamService, region: focus.region, limit: 3 },
+			};
+		}
+	}
+
+	return null;
+}
+
+function shouldUseRecommendation(
+	request: InvestigationToolRequest,
+	recommended: InvestigationToolRequest,
+	focus: InvestigationFocus,
+	toolRuns: StoredToolRun[],
+) {
+	if (sameToolCall(request, recommended)) return false;
+
+	if (request.tool === "getTrace") {
+		return observedTraceIds(toolRuns).size > 0 && !observedTraceIds(toolRuns).has(request.input.traceId);
+	}
+
+	if (request.tool === "getMetrics") {
+		const metricAvailable = metricExists(request.input.service, request.input.region, request.input.metric);
+		if (!metricAvailable) return true;
+		return !isRelevantService(request.input.service, focus, toolRuns);
+	}
+
+	if (request.tool === "getServiceHealth") {
+		return Object.keys(request.input).length === 0;
+	}
+
+	return false;
+}
+
+function withPolicyResult(request: InvestigationToolRequest, reason: string): RunnableToolRequest {
+	return {
+		...request,
+		policyResult: { policy: { status: "rejected", reason } },
+	};
+}
+
+function hasExactToolRun(toolRuns: StoredToolRun[], request: InvestigationToolRequest) {
+	return toolRuns.some((toolRun) => sameToolCall({ tool: toolRun.toolName, input: toolRun.input } as InvestigationToolRequest, request));
+}
+
+function sameToolCall(left: InvestigationToolRequest, right: InvestigationToolRequest) {
+	return left.tool === right.tool && stableJson(left.input) === stableJson(right.input);
+}
+
+function stableJson(value: unknown): string {
+	if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+	if (isRecord(value)) {
+		return `{${Object.keys(value)
+			.sort()
+			.map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+			.join(",")}}`;
+	}
+	return JSON.stringify(value);
+}
+
+function mentionedRegion(symptom: string) {
+	return symptom.match(/\b[a-z]{2}-[a-z]+-\d\b/)?.[0];
+}
+
+function metricExists(service: string, region: string | undefined, metric: string) {
+	return availableMetricsByService.some(
+		(entry) => entry.service === service && (!region || entry.region === region) && entry.metrics.includes(metric),
+	);
+}
+
+function hasMetricRun(toolRuns: StoredToolRun[], service: string, region: string | undefined, metric: string) {
+	return toolRuns.some(
+		(toolRun) =>
+			toolRun.toolName === "getMetrics" &&
+			isRecord(toolRun.input) &&
+			toolRun.input.service === service &&
+			(!region || toolRun.input.region === region) &&
+			toolRun.input.metric === metric &&
+			metricRunHasSeries(toolRun),
+	);
+}
+
+function metricRunHasSeries(toolRun: StoredToolRun) {
+	return isRecord(toolRun.output) && Array.isArray(toolRun.output.series) && toolRun.output.series.length > 0;
+}
+
+function hasToolRun(toolRuns: StoredToolRun[], toolName: ToolName, service?: string, region?: string) {
+	return toolRuns.some(
+		(toolRun) =>
+			toolRun.toolName === toolName &&
+			isRecord(toolRun.input) &&
+			(!service || toolRun.input.service === service) &&
+			(!region || toolRun.input.region === region),
+	);
+}
+
+function isRelevantService(service: string, focus: InvestigationFocus, toolRuns: StoredToolRun[]) {
+	if (service === focus.service) return true;
+	return observedServices(toolRuns).has(service);
+}
+
+function observedServices(toolRuns: StoredToolRun[]) {
+	const services = new Set<string>();
+	for (const match of JSON.stringify(successfulEvidenceOutputs(toolRuns)).matchAll(/"service":"([^"]+)"/g)) {
+		services.add(match[1]);
+	}
+	for (const match of JSON.stringify(successfulEvidenceOutputs(toolRuns)).matchAll(/"upstream":"([^"]+)"/g)) {
+		services.add(match[1]);
+	}
+	return services;
+}
+
+function observedTraceIds(toolRuns: StoredToolRun[]) {
+	const traceIds = new Set<string>();
+	for (const match of JSON.stringify(successfulEvidenceOutputs(toolRuns)).matchAll(/"traceId":"([^"]+)"/g)) {
+		traceIds.add(match[1]);
+	}
+	for (const match of JSON.stringify(successfulEvidenceOutputs(toolRuns)).matchAll(/"id":"(trace-[^"]+)"/g)) {
+		traceIds.add(match[1]);
+	}
+	return traceIds;
+}
+
+function firstUninspectedTraceId(toolRuns: StoredToolRun[]) {
+	const inspected = new Set(
+		toolRuns
+			.filter((toolRun) => toolRun.toolName === "getTrace" && isRecord(toolRun.input) && typeof toolRun.input.traceId === "string")
+			.map((toolRun) => (toolRun.input as GetTraceInput).traceId),
+	);
+	return Array.from(observedTraceIds(toolRuns)).find((traceId) => !inspected.has(traceId)) ?? null;
+}
+
+function observedUpstreamService(toolRuns: StoredToolRun[]) {
+	const output = JSON.stringify(successfulEvidenceOutputs(toolRuns));
+	return output.match(/"upstream":"([^"]+)"/)?.[1] ?? output.match(/"service":"((?!checkout-api)[^"]+)"/)?.[1] ?? null;
+}
+
+function successfulEvidenceOutputs(toolRuns: StoredToolRun[]) {
+	return toolRuns
+		.filter((toolRun) => toolRun.toolName !== "getServiceHealth")
+		.filter((toolRun) => toolRun.status === "succeeded" && toolRun.output && !isPolicyResult(toolRun.output))
+		.map((toolRun) => toolRun.output);
+}
+
+function isPolicyResult(value: unknown) {
+	return isRecord(value) && isRecord(value.policy) && value.policy.status === "rejected";
 }
 
 function parseToolRequest(value: unknown): InvestigationToolRequest {

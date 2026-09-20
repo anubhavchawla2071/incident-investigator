@@ -156,6 +156,147 @@ describe("investigation coordinator", () => {
 		});
 		expect(store.toolRuns[2].output).toMatchObject({ returned: 1 });
 	});
+
+	it("keeps a checkout investigation focused when Llama wanders to unrelated or empty tools", async () => {
+		const store = new MemoryInvestigationStore("focused-incident", "Checkout API is returning 500 errors in us-east-1. Can you investigate what changed?");
+		let calls = 0;
+		const model: InvestigationModel = {
+			decide: async () => {
+				calls += 1;
+				if (calls === 1) {
+					return {
+						kind: "tool",
+						request: { tool: "getMetrics", input: { service: "checkout-api", region: "us-east-1", metric: "error-rate" } },
+					};
+				}
+				if (calls === 2) {
+					return {
+						kind: "tool",
+						request: { tool: "getMetrics", input: { service: "payments-service", region: "us-east-1", metric: "db.pool.active_connections" } },
+					};
+				}
+				if (calls === 3) {
+					return {
+						kind: "tool",
+						request: { tool: "getTrace", input: { traceId: "9638c880-bfd0-4b78-b33e-492818dc8736" } },
+					};
+				}
+				if (calls === 4) {
+					return {
+						kind: "tool",
+						request: { tool: "getMetrics", input: { service: "checkout-api", region: "us-east-1", metric: "db.pool.active_connections" } },
+					};
+				}
+				return {
+					kind: "report",
+					report: {
+						outcome: "resolved",
+						diagnosis: "Checkout 500s are tied to cart reservation failures after a cart deployment.",
+						rootCause: "cart-service changed the reservation contract while checkout still sends the old payload.",
+						confidence: 0.9,
+						suggestedNextSteps: ["Roll back or patch the cart-service deployment."],
+						evidenceToolRunIds: store.toolRuns.map((toolRun) => toolRun.id),
+					},
+				};
+			},
+		};
+
+		const result = await runInvestigation({
+			incidentId: "focused-incident",
+			model,
+			store,
+			steps: directSteps,
+		});
+
+		expect(result.status).toBe("resolved");
+		expect(store.toolRuns.map((toolRun) => [toolRun.toolName, toolRun.input])).toEqual([
+			["getServiceHealth", {}],
+			["getMetrics", { service: "checkout-api", region: "us-east-1", metric: "http.server.error_rate" }],
+			["searchLogs", { service: "checkout-api", region: "us-east-1", level: "error", query: "500", limit: 10 }],
+			["getTrace", { traceId: "trace-checkout-500-01" }],
+			["getRecentDeployments", { service: "cart-service", region: "us-east-1", limit: 3 }],
+		]);
+		expect(JSON.stringify(store.toolRuns.slice(1).map((toolRun) => toolRun.output))).not.toContain("payments-service");
+		expect(JSON.stringify(store.toolRuns.map((toolRun) => toolRun.output))).not.toContain("9638c880");
+	});
+
+	it("records a controlled policy result when Llama invents a trace id before any trace id is observed", async () => {
+		const store = new MemoryInvestigationStore("invented-trace-incident", "Checkout API is returning 500 errors.");
+		let calls = 0;
+		const model: InvestigationModel = {
+			decide: async () => {
+				calls += 1;
+				if (calls === 1) {
+					return { kind: "tool", request: { tool: "getTrace", input: { traceId: "made-up-trace" } } };
+				}
+				return {
+					kind: "report",
+					report: {
+						outcome: "inconclusive",
+						diagnosis: "Trace lookup was rejected because no trace ID had been observed.",
+						rootCause: "Inconclusive.",
+						confidence: 0.2,
+						suggestedNextSteps: ["Search logs first to find a real trace ID."],
+						evidenceToolRunIds: store.toolRuns.map((toolRun) => toolRun.id),
+					},
+				};
+			},
+		};
+
+		const result = await runInvestigation({
+			incidentId: "invented-trace-incident",
+			model,
+			store,
+			steps: directSteps,
+		});
+
+		expect(result.status).toBe("inconclusive");
+		expect(store.toolRuns[1]).toMatchObject({
+			toolName: "getTrace",
+			input: { traceId: "made-up-trace" },
+			output: { policy: expect.objectContaining({ status: "rejected" }) },
+		});
+		expect(store.toolRuns[1].output).not.toEqual({ trace: null });
+	});
+
+	it("records a controlled policy result for exact duplicate tool calls", async () => {
+		const store = new MemoryInvestigationStore("duplicate-incident", "Something is odd in production.");
+		let calls = 0;
+		const model: InvestigationModel = {
+			decide: async () => {
+				calls += 1;
+				if (calls === 1) {
+					return { kind: "tool", request: { tool: "getServiceHealth", input: {} } };
+				}
+				return {
+					kind: "report",
+					report: {
+						outcome: "inconclusive",
+						diagnosis: "Duplicate tool call was rejected.",
+						rootCause: "Inconclusive.",
+						confidence: 0.2,
+						suggestedNextSteps: ["Use the existing service health result."],
+						evidenceToolRunIds: store.toolRuns.map((toolRun) => toolRun.id),
+					},
+				};
+			},
+		};
+
+		const result = await runInvestigation({
+			incidentId: "duplicate-incident",
+			model,
+			store,
+			steps: directSteps,
+		});
+
+		expect(result.status).toBe("inconclusive");
+		expect(store.toolRuns).toHaveLength(2);
+		expect(store.toolRuns[1]).toMatchObject({
+			toolName: "getServiceHealth",
+			input: {},
+			output: { policy: expect.objectContaining({ status: "rejected", reason: expect.stringContaining("Duplicate") }) },
+		});
+	});
 });
 
 class MemoryInvestigationStore implements InvestigationStore {
