@@ -80,10 +80,27 @@ describe("investigation coordinator", () => {
 		expect(store.incident.status).toBe("failed");
 	});
 
-	it("stops at six tool calls and records an inconclusive report", async () => {
+	it("stops at ten tool calls and asks the model for a final report", async () => {
 		const store = new MemoryInvestigationStore("limit-incident", "The API is returning 500 errors.");
+		let finalReportRequested = false;
 		const model: InvestigationModel = {
-			decide: async () => ({ kind: "tool", request: { tool: "searchLogs", input: {} } }),
+			decide: async ({ finalReportRequired }) => {
+				if (finalReportRequired) {
+					finalReportRequested = true;
+					return {
+						kind: "report",
+						report: {
+							outcome: "inconclusive",
+							diagnosis: "The available evidence does not support a conclusive diagnosis.",
+							rootCause: "Inconclusive after reviewing the collected evidence.",
+							confidence: 0.3,
+							suggestedNextSteps: ["Continue from the collected evidence."],
+							evidenceToolRunIds: store.toolRuns.map((toolRun) => toolRun.id),
+						},
+					};
+				}
+				return { kind: "tool", request: { tool: "searchLogs", input: {} } };
+			},
 		};
 
 		const result = await runInvestigation({
@@ -94,7 +111,8 @@ describe("investigation coordinator", () => {
 		});
 
 		expect(result.status).toBe("inconclusive");
-		expect(store.toolRuns).toHaveLength(6);
+		expect(store.toolRuns).toHaveLength(10);
+		expect(finalReportRequested).toBe(true);
 		expect(store.report?.outcome).toBe("inconclusive");
 		expect(store.report?.evidenceToolRunIds).toEqual(store.toolRuns.map((toolRun) => toolRun.id));
 	});

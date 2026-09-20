@@ -39,7 +39,7 @@ export function createInvestigationModel(ai?: WorkersAiBinding): InvestigationMo
 export class WorkersAiInvestigationModel implements InvestigationModel {
 	constructor(private readonly ai: WorkersAiBinding) {}
 
-	async decide(input: { symptom: string; toolRuns: StoredToolRun[] }): Promise<ModelDecision> {
+	async decide(input: { symptom: string; toolRuns: StoredToolRun[]; finalReportRequired?: boolean }): Promise<ModelDecision> {
 		const response = asResponse(
 			await this.ai.run(INVESTIGATION_MODEL, {
 				messages: [
@@ -69,7 +69,7 @@ export class WorkersAiInvestigationModel implements InvestigationModel {
 
 const investigationSystemPrompt = `You are an incident investigator. Your only evidence is the user symptom, service catalog, and completed tool results supplied in this conversation. Never assume access to raw observability fixtures or undisclosed logs, metrics, traces, or deployments.
 
-Choose exactly one next investigation tool when more evidence is needed. Do not diagnose from one isolated signal. Gather corroborating evidence appropriate to the hypothesis, but do not use a fixed tool count. The orchestrator already starts every investigation with getServiceHealth and enforces the overall call limit.
+Choose exactly one next investigation tool when more evidence is needed. Do not diagnose from one isolated signal. Gather corroborating evidence appropriate to the hypothesis, but do not use a fixed tool count. The orchestrator already starts every investigation with getServiceHealth and enforces the overall call limit. When finalReportRequired is true, do not call a tool; write the best supported final report from the completed evidence.
 
 Investigation policy:
 - Keep the investigation focused on the user-reported service, region, and symptom. Do not jump to another degraded service from the health overview unless the symptom or prior tool evidence connects that service.
@@ -124,9 +124,18 @@ const investigationToolSchemas: ToolDefinition[] = [
 	},
 ];
 
-function toModelContext({ symptom, toolRuns }: { symptom: string; toolRuns: StoredToolRun[] }) {
+function toModelContext({
+	symptom,
+	toolRuns,
+	finalReportRequired,
+}: {
+	symptom: string;
+	toolRuns: StoredToolRun[];
+	finalReportRequired?: boolean;
+}) {
 	return {
 		reportedSymptom: symptom,
+		finalReportRequired: finalReportRequired ?? false,
 		serviceCatalog,
 		availableMetrics: allowedMetricNames,
 		availableMetricsByService,

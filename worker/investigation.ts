@@ -45,6 +45,7 @@ export interface InvestigationModel {
 	decide(input: {
 		symptom: string;
 		toolRuns: StoredToolRun[];
+		finalReportRequired?: boolean;
 	}): Promise<ModelDecision>;
 }
 
@@ -72,7 +73,7 @@ export interface InvestigationResult {
 
 type RunnableToolRequest = InvestigationToolRequest & { policyResult?: InvestigationToolResult };
 
-const MAX_TOOL_CALLS = 6;
+const MAX_TOOL_CALLS = 10;
 
 export async function runInvestigation({
 	incidentId,
@@ -102,8 +103,13 @@ export async function runInvestigation({
 		while (true) {
 			const toolRuns = await store.listToolRuns(incidentId);
 			if (toolRuns.length >= MAX_TOOL_CALLS) {
-				const report = await steps.do("write inconclusive report", () =>
-					coordinator.finalize(createLimitReport(toolRuns)),
+				const finalDecision = await steps.do("write report from collected evidence", () =>
+					model.decide({ symptom, toolRuns, finalReportRequired: true }),
+				);
+				const report = await steps.do("write final report", () =>
+					coordinator.finalize(
+						finalDecision.kind === "report" ? finalDecision.report : createLimitReport(toolRuns),
+					),
 				);
 				return { status: report.outcome, report };
 			}
