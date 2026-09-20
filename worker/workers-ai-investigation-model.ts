@@ -40,6 +40,10 @@ export class WorkersAiInvestigationModel implements InvestigationModel {
 	constructor(private readonly ai: WorkersAiBinding) {}
 
 	async decide(input: { symptom: string; toolRuns: StoredToolRun[]; finalReportRequired?: boolean }): Promise<ModelDecision> {
+		if (input.finalReportRequired) {
+			return this.writeFinalReport(input.toolRuns);
+		}
+
 		const request: WorkersAiRequest = {
 			messages: [
 				{ role: "system", content: investigationSystemPrompt },
@@ -47,14 +51,10 @@ export class WorkersAiInvestigationModel implements InvestigationModel {
 			],
 			temperature: 0.1,
 			max_tokens: 900,
+			tools: investigationToolSchemas,
 		};
-		if (!input.finalReportRequired) {
-			request.tools = investigationToolSchemas;
-		}
 
-		const response = asResponse(
-			await this.ai.run(INVESTIGATION_MODEL, request),
-		);
+		const response = asResponse(await this.ai.run(INVESTIGATION_MODEL, request));
 
 		if (response.tool_calls?.length) {
 			const [toolCall] = response.tool_calls;
@@ -68,6 +68,27 @@ export class WorkersAiInvestigationModel implements InvestigationModel {
 		}
 
 		return { kind: "report", report: parseReport(response.response) };
+	}
+
+	private async writeFinalReport(toolRuns: StoredToolRun[]): Promise<ModelDecision> {
+		const evidence = toFinalReportContext(toolRuns);
+		const request = finalReportRequest(evidence);
+
+		try {
+			return { kind: "report", report: parseReport((asResponse(await this.ai.run(INVESTIGATION_MODEL, request))).response) };
+		} catch (error) {
+			if (!(error instanceof InvalidReportJsonError)) throw error;
+		}
+
+		try {
+			const retryRequest = finalReportRequest(evidence, "Previous response was not valid JSON. Return only corrected JSON matching the required schema.");
+			return { kind: "report", report: parseReport((asResponse(await this.ai.run(INVESTIGATION_MODEL, retryRequest))).response) };
+		} catch (error) {
+			if (error instanceof InvalidReportJsonError) {
+				throw new Error("Workers AI final report was not valid JSON after one retry.");
+			}
+			throw error;
+		}
 	}
 }
 
@@ -128,18 +149,12 @@ const investigationToolSchemas: ToolDefinition[] = [
 	},
 ];
 
-function toModelContext({
-	symptom,
-	toolRuns,
-	finalReportRequired,
-}: {
+function toModelContext({ symptom, toolRuns }: {
 	symptom: string;
 	toolRuns: StoredToolRun[];
-	finalReportRequired?: boolean;
 }) {
 	return {
 		reportedSymptom: symptom,
-		finalReportRequired: finalReportRequired ?? false,
 		serviceCatalog,
 		availableMetrics: allowedMetricNames,
 		availableMetricsByService,
@@ -152,6 +167,70 @@ function toModelContext({
 				result: toolRun.output,
 			})),
 	};
+}
+
+const finalReportSystemPrompt = `You are writing the final report for an incident investigation. Use only the compact evidence summary and cite only IDs from evidenceToolRunIds. Do not call tools. Return only JSON matching reportSchema, with no markdown or extra text.`;
+
+function finalReportRequest(evidence: ReturnType<typeof toFinalReportContext>, correction?: string): WorkersAiRequest {
+	return {
+		messages: [
+			{ role: "system", content: finalReportSystemPrompt },
+			{ role: "user", content: JSON.stringify({ ...evidence, correction }) },
+		],
+		temperature: 0,
+		max_tokens: 450,
+	};
+}
+
+function toFinalReportContext(toolRuns: StoredToolRun[]) {
+	const completedRuns = toolRuns.filter((toolRun) => toolRun.status === "succeeded" && toolRun.output);
+	return {
+		evidenceSummary: completedRuns.map(summarizeEvidence).filter((summary): summary is string => Boolean(summary)),
+		evidenceToolRunIds: completedRuns.map((toolRun) => toolRun.id),
+		reportSchema: {
+			outcome: "resolved or inconclusive",
+			diagnosis: "string",
+			rootCause: "string",
+			confidence: "number from 0 to 1",
+			suggestedNextSteps: ["string"],
+			evidenceToolRunIds: ["tool run id"],
+		},
+	};
+}
+
+function summarizeEvidence(toolRun: StoredToolRun): string | null {
+	const output = isRecord(toolRun.output) ? toolRun.output : null;
+	if (!output) return null;
+
+	if (toolRun.toolName === "getMetrics" && Array.isArray(output.series)) {
+		const series = output.series[0];
+		if (!isRecord(series) || !Array.isArray(series.points) || series.points.length < 2) return null;
+		const first = series.points[0];
+		const last = series.points.at(-1);
+		if (!isRecord(first) || !isRecord(last)) return null;
+		return `${String(series.service)} ${String(series.region)} ${String(series.name)} increased from ${String(first.value)}${series.unit === "percent" ? "%" : ""} to ${String(last.value)}${series.unit === "percent" ? "%" : ""}.`;
+	}
+
+	if (toolRun.toolName === "searchLogs" && Array.isArray(output.logs)) {
+		const log = output.logs.find(isRecord);
+		if (!log || !isRecord(log.attributes)) return null;
+		return `${String(log.service)} log ${String(log.id)} shows statusCode ${String(log.attributes.statusCode)}, upstream ${String(log.attributes.upstream)}, traceId ${String(log.attributes.traceId)}.`;
+	}
+
+	if (toolRun.toolName === "getTrace" && isRecord(output.trace) && Array.isArray(output.trace.spans)) {
+		const failedSpan = output.trace.spans.find((span) => isRecord(span) && span.status === "error" && isRecord(span.attributes) && span.attributes.errorType);
+		if (!isRecord(failedSpan) || !isRecord(failedSpan.attributes)) return null;
+		return `Trace ${String(output.trace.id)} shows ${String(failedSpan.service)} ${String(failedSpan.operation)} failed with ${String(failedSpan.attributes.errorType)}.`;
+	}
+
+	if (toolRun.toolName === "getRecentDeployments" && Array.isArray(output.deployments)) {
+		const deployment = output.deployments[0];
+		if (!isRecord(deployment)) return null;
+		const changes = Array.isArray(deployment.changes) ? deployment.changes.map(String).join(" ") : "";
+		return `${String(deployment.service)} deployment ${String(deployment.id)} version ${String(deployment.version)} completed at ${String(deployment.completedAt)} and changed ${changes}`;
+	}
+
+	return null;
 }
 
 function parseReport(response: unknown): InvestigationReportDraft {
@@ -174,7 +253,13 @@ function parseJsonObject(value: string): unknown {
 	try {
 		return JSON.parse(value);
 	} catch {
-		throw new Error("Workers AI final response was not valid JSON.");
+		throw new InvalidReportJsonError();
+	}
+}
+
+class InvalidReportJsonError extends Error {
+	constructor() {
+		super("Workers AI final response was not valid JSON.");
 	}
 }
 
