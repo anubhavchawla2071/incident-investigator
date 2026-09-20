@@ -13,6 +13,20 @@ The React application is served by the Worker. `GET /api/health` confirms that t
 
 Workers AI runs remotely, so it is enabled only in the production Worker environment. This keeps the local scaffold runnable without Cloudflare credentials. The app does not call a model yet, so it has no inference behavior or associated feature logic.
 
+## Local database
+
+Apply pending D1 migrations to the local database:
+
+```sh
+npm run db:migrate:local
+```
+
+Verify that the four application tables exist:
+
+```sh
+npm run db:verify:local
+```
+
 ## Before deployment
 
 Create a D1 database and replace both placeholder `database_id` values in `wrangler.jsonc` with the identifier returned by Wrangler:
