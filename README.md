@@ -11,7 +11,7 @@ npm run dev
 
 The React application is served by the Worker. `GET /api/health` confirms that the local Worker has its D1 binding available.
 
-Workers AI runs remotely, so it is enabled only in the production Worker environment. The current backend deliberately uses a deterministic fixture model instead of Workers AI, so local development and tests do not need Cloudflare credentials. A Workers AI adapter will replace that model in a later phase.
+Workers AI runs remotely, so local development and tests use the deterministic fixture model without Cloudflare credentials. In the deployed production environment, the same investigation interface uses Workers AI Llama 3.3 with function calling. The model receives only the reported symptom, a small service catalog, the five tool schemas, and results from prior tool calls—never the complete fixture dataset.
 
 ## Investigation API and Workflow
 
