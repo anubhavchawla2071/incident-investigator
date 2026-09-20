@@ -6,6 +6,25 @@ import type {
 } from "./investigation";
 import type { InvestigationToolRequest, InvestigationToolResult, ToolName } from "./tools";
 
+export interface IncidentDetails {
+	incident: {
+		id: string;
+		title: string;
+		status: "open" | "investigating" | "resolved" | "failed";
+		currentActivity: string | null;
+		createdAt: string;
+		updatedAt: string;
+	};
+	messages: Array<{
+		id: string;
+		role: "user" | "assistant";
+		content: string;
+		createdAt: string;
+	}>;
+	toolRuns: Array<StoredToolRun & { createdAt: string; completedAt: string | null }>;
+	report: (InvestigationReport & { createdAt: string; updatedAt: string }) | null;
+}
+
 export class D1InvestigationStore implements InvestigationStore {
 	constructor(private readonly db: D1Database) {}
 
@@ -120,6 +139,58 @@ export class D1InvestigationStore implements InvestigationStore {
 			.bind(activity, incidentId)
 			.run();
 	}
+
+	async getIncidentDetails(incidentId: string): Promise<IncidentDetails | null> {
+		const incident = await this.db
+			.prepare("SELECT id, title, status, current_activity, created_at, updated_at FROM incidents WHERE id = ?")
+			.bind(incidentId)
+			.first<IncidentRow>();
+		if (!incident) {
+			return null;
+		}
+
+		const [messages, toolRuns, report] = await Promise.all([
+			this.db
+				.prepare("SELECT id, role, content, created_at FROM messages WHERE incident_id = ? ORDER BY created_at ASC, id ASC")
+				.bind(incidentId)
+				.all<MessageRow>(),
+			this.db
+				.prepare(
+					"SELECT id, incident_id, tool_name, input_json, output_json, status, created_at, completed_at FROM tool_runs WHERE incident_id = ? ORDER BY created_at ASC, id ASC",
+				)
+				.bind(incidentId)
+				.all<ToolRunDetailsRow>(),
+			this.db
+				.prepare(
+					"SELECT id, incident_id, outcome, summary, root_cause, confidence, suggested_next_steps_json, evidence_tool_run_ids_json, created_at, updated_at FROM reports WHERE incident_id = ?",
+				)
+				.bind(incidentId)
+				.first<ReportRow>(),
+		]);
+
+		return {
+			incident: {
+				id: incident.id,
+				title: incident.title,
+				status: incident.status,
+				currentActivity: incident.current_activity,
+				createdAt: incident.created_at,
+				updatedAt: incident.updated_at,
+			},
+			messages: messages.results.map((message) => ({
+				id: message.id,
+				role: message.role,
+				content: message.content,
+				createdAt: message.created_at,
+			})),
+			toolRuns: toolRuns.results.map((toolRun) => ({
+				...toStoredToolRun(toolRun),
+				createdAt: toolRun.created_at,
+				completedAt: toolRun.completed_at,
+			})),
+			report: report ? toReport(report) : null,
+		};
+	}
 }
 
 interface ToolRunRow {
@@ -131,6 +202,40 @@ interface ToolRunRow {
 	status: StoredToolRun["status"];
 }
 
+interface ToolRunDetailsRow extends ToolRunRow {
+	created_at: string;
+	completed_at: string | null;
+}
+
+interface IncidentRow {
+	id: string;
+	title: string;
+	status: IncidentDetails["incident"]["status"];
+	current_activity: string | null;
+	created_at: string;
+	updated_at: string;
+}
+
+interface MessageRow {
+	id: string;
+	role: "user" | "assistant";
+	content: string;
+	created_at: string;
+}
+
+interface ReportRow {
+	id: string;
+	incident_id: string;
+	outcome: ReportOutcome;
+	summary: string;
+	root_cause: string;
+	confidence: number;
+	suggested_next_steps_json: string;
+	evidence_tool_run_ids_json: string;
+	created_at: string;
+	updated_at: string;
+}
+
 function toStoredToolRun(row: ToolRunRow): StoredToolRun {
 	return {
 		id: row.id,
@@ -139,5 +244,20 @@ function toStoredToolRun(row: ToolRunRow): StoredToolRun {
 		input: JSON.parse(row.input_json) as InvestigationToolRequest["input"],
 		output: row.output_json ? (JSON.parse(row.output_json) as InvestigationToolResult) : null,
 		status: row.status,
+	};
+}
+
+function toReport(row: ReportRow): InvestigationReport & { createdAt: string; updatedAt: string } {
+	return {
+		id: row.id,
+		incidentId: row.incident_id,
+		outcome: row.outcome,
+		diagnosis: row.summary,
+		rootCause: row.root_cause,
+		confidence: row.confidence,
+		suggestedNextSteps: JSON.parse(row.suggested_next_steps_json) as string[],
+		evidenceToolRunIds: JSON.parse(row.evidence_tool_run_ids_json) as string[],
+		createdAt: row.created_at,
+		updatedAt: row.updated_at,
 	};
 }

@@ -1,3 +1,5 @@
+import { D1InvestigationStore } from "./investigation-store";
+
 export interface Env {
 	AI?: Ai;
 	DB: D1Database;
@@ -53,6 +55,14 @@ export default {
 			}
 		}
 
+		const incidentId = incidentIdFromPath(url.pathname);
+		if (incidentId && request.method === "GET") {
+			const details = await new D1InvestigationStore(env.DB).getIncidentDetails(incidentId);
+			return details
+				? Response.json(details)
+				: Response.json({ error: "Incident not found." }, { status: 404 });
+		}
+
 		return new Response("Not found", { status: 404 });
 	},
 } satisfies ExportedHandler<Env>;
@@ -74,4 +84,9 @@ async function readIncidentMessage(request: Request): Promise<string | null> {
 
 function incidentTitle(message: string) {
 	return message.length <= 120 ? message : `${message.slice(0, 117)}...`;
+}
+
+function incidentIdFromPath(pathname: string) {
+	const match = pathname.match(/^\/api\/incidents\/([^/]+)$/);
+	return match?.[1] ? decodeURIComponent(match[1]) : null;
 }

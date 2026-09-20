@@ -15,6 +15,8 @@ Workers AI runs remotely, so it is enabled only in the production Worker environ
 
 ## Investigation API and Workflow
 
+Open the local app at `http://localhost:5173` to use the internal incident console. It lets you submit a symptom, shows the latest incident status and activity while it refreshes, displays each persisted tool call, and renders the final report. Example buttons only prefill the message; they never select fixture data.
+
 Create an investigation by sending only the observed symptom—there is no scenario or service selector:
 
 ```sh
@@ -24,6 +26,12 @@ curl -X POST http://localhost:5173/api/incidents \
 ```
 
 The Worker creates the incident and its user message in D1, then starts `IncidentInvestigationWorkflow`. The Workflow always records a `getServiceHealth` run first. The local deterministic model sees only the symptom and results from completed tool runs, chooses subsequent tools, and is capped at six calls. Each tool input/result is saved in `tool_runs`; the final report includes its outcome, diagnosis, root cause, confidence, suggested next steps, and evidence tool-run IDs.
+
+Read the UI state for one incident with:
+
+```sh
+curl http://localhost:5173/api/incidents/<incident-id>
+```
 
 The report's `outcome` is either `resolved` or `inconclusive`. The incident status becomes `resolved` when the investigation has finished, including an inconclusive report; `current_activity` keeps the latest workflow activity for the future UI.
 
