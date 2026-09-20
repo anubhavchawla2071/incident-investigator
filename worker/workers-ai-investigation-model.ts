@@ -6,6 +6,7 @@ import type {
 	StoredToolRun,
 } from "./investigation";
 import { serviceCatalog } from "./service-catalog";
+import { allowedMetricNames } from "./tools";
 
 export const INVESTIGATION_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 
@@ -70,6 +71,8 @@ const investigationSystemPrompt = `You are an incident investigator. Your only e
 
 Choose exactly one next investigation tool when more evidence is needed. Do not diagnose from one isolated signal. Gather corroborating evidence appropriate to the hypothesis, but do not use a fixed tool count. The orchestrator already starts every investigation with getServiceHealth and enforces the overall call limit.
 
+For getMetrics, use only these exact metric names: ${allowedMetricNames.join(", ")}.
+
 When evidence is sufficient, return only a JSON object with this shape: {"outcome":"resolved"|"inconclusive","diagnosis":"string","rootCause":"string","confidence":number from 0 to 1,"suggestedNextSteps":["string"],"evidenceToolRunIds":["tool run id"]}. Cite only IDs from completed tool results. If evidence is insufficient, return outcome "inconclusive" instead of guessing.`;
 
 const investigationToolSchemas: ToolDefinition[] = [
@@ -90,7 +93,7 @@ const investigationToolSchemas: ToolDefinition[] = [
 		description: "Return a requested metric series for one service and optional region.",
 		parameters: objectSchema({
 			service: stringSchema("Service name from the catalog."),
-			metric: stringSchema("Metric name to retrieve."),
+			metric: stringSchema(`Metric name to retrieve. Use exactly one of: ${allowedMetricNames.join(", ")}.`),
 			region: stringSchema("Cloud region."),
 		}, ["service", "metric"]),
 	},
@@ -119,6 +122,7 @@ function toModelContext({ symptom, toolRuns }: { symptom: string; toolRuns: Stor
 	return {
 		reportedSymptom: symptom,
 		serviceCatalog,
+		availableMetrics: allowedMetricNames,
 		completedToolResults: toolRuns
 			.filter((toolRun) => toolRun.status === "succeeded")
 			.map((toolRun) => ({

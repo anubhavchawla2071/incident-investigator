@@ -27,6 +27,12 @@ interface IncidentDetails {
 	} | null;
 }
 
+interface HealthDetails {
+	bindings: {
+		workersAi: boolean;
+	};
+}
+
 const examplePrompts = [
 	"The API is returning 500 errors. Can you investigate?",
 	"Orders are slow for customers in Europe.",
@@ -36,6 +42,7 @@ const examplePrompts = [
 export default function App() {
 	const [message, setMessage] = useState("");
 	const [details, setDetails] = useState<IncidentDetails | null>(null);
+	const [health, setHealth] = useState<HealthDetails | null>(null);
 	const [isSubmitting, setIsSubmitting] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 
@@ -43,6 +50,13 @@ export default function App() {
 		const response = await fetch(`/api/incidents/${incidentId}`);
 		if (!response.ok) throw new Error("Could not load the incident.");
 		setDetails((await response.json()) as IncidentDetails);
+	}, []);
+
+	useEffect(() => {
+		void fetch("/api/health")
+			.then((response) => response.ok ? response.json() : null)
+			.then((payload) => setHealth(payload as HealthDetails | null))
+			.catch(() => setHealth(null));
 	}, []);
 
 	useEffect(() => {
@@ -89,7 +103,7 @@ export default function App() {
 					<p className="product-mark">Incident Investigator</p>
 					<p className="product-subtitle">Simulated production observability console</p>
 				</div>
-				<span className="environment-pill"><i /> Local deterministic mode</span>
+				<span className="environment-pill"><i /> {modelModeLabel(health)}</span>
 			</header>
 			<div className="console-layout">
 				<aside className="composer-panel">
@@ -112,6 +126,11 @@ export default function App() {
 
 function EmptyState() {
 	return <div className="empty-state"><span>⌁</span><h1>Start an investigation</h1><p>The agent will check service health, follow the evidence with tools, and save a report here.</p></div>;
+}
+
+function modelModeLabel(health: HealthDetails | null) {
+	if (!health) return "Checking model mode";
+	return health.bindings.workersAi ? "Workers AI mode" : "Local deterministic mode";
 }
 
 function IncidentView({ details, toolNames }: { details: IncidentDetails; toolNames: Map<string, ToolName> }) {

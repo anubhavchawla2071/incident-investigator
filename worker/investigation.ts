@@ -6,6 +6,7 @@ import {
 	type GetTraceInput,
 	type InvestigationToolRequest,
 	type InvestigationToolResult,
+	allowedMetricNames,
 	type SearchLogsInput,
 	type ToolName,
 } from "./tools";
@@ -217,39 +218,123 @@ function validateReportDraft(draft: InvestigationReportDraft) {
 }
 
 function parseToolRequest(value: unknown): InvestigationToolRequest {
-	if (!isRecord(value) || typeof value.tool !== "string" || !isRecord(value.input)) {
+	if (!isRecord(value) || typeof value.tool !== "string") {
 		throw new Error("Model returned an invalid tool call.");
 	}
 
+	const input = normalizeToolInput(value.tool, value.input ?? {});
+
 	switch (value.tool) {
 		case "searchLogs":
-			if (optionalStrings(value.input, ["service", "region", "query", "start", "end"]) && optionalNumber(value.input, "limit")) {
-				return { tool: value.tool, input: value.input as SearchLogsInput };
+			if (optionalStrings(input, ["service", "region", "query", "level", "start", "end"]) && optionalNumber(input, "limit") && optionalLogLevel(input, "level")) {
+				return { tool: value.tool, input: input as SearchLogsInput };
 			}
 			break;
 		case "getMetrics":
-			if (typeof value.input.service === "string" && typeof value.input.metric === "string" && optionalStrings(value.input, ["region"])) {
-				return { tool: value.tool, input: value.input as unknown as GetMetricsInput };
+			if (typeof input.service === "string" && typeof input.metric === "string" && optionalStrings(input, ["region"])) {
+				return { tool: value.tool, input: input as unknown as GetMetricsInput };
 			}
 			break;
 		case "getServiceHealth":
-			if (optionalStrings(value.input, ["service", "region"])) {
-				return { tool: value.tool, input: value.input as GetServiceHealthInput };
+			if (optionalStrings(input, ["service", "region"])) {
+				return { tool: value.tool, input: input as GetServiceHealthInput };
 			}
 			break;
 		case "getRecentDeployments":
-			if (optionalStrings(value.input, ["service", "region"]) && optionalNumber(value.input, "limit")) {
-				return { tool: value.tool, input: value.input as GetRecentDeploymentsInput };
+			if (optionalStrings(input, ["service", "region"]) && optionalNumber(input, "limit")) {
+				return { tool: value.tool, input: input as GetRecentDeploymentsInput };
 			}
 			break;
 		case "getTrace":
-			if (typeof value.input.traceId === "string") {
-				return { tool: value.tool, input: value.input as unknown as GetTraceInput };
+			if (typeof input.traceId === "string") {
+				return { tool: value.tool, input: input as unknown as GetTraceInput };
 			}
 			break;
 	}
 
 	throw new Error(`Model returned invalid input for ${value.tool}.`);
+}
+
+function normalizeToolInput(tool: string, rawInput: unknown): Record<string, unknown> {
+	const input = parseInputObject(rawInput);
+	switch (tool) {
+		case "searchLogs":
+			return normalizeSearchLogsInput(input);
+		case "getMetrics":
+			return normalizeGetMetricsInput(input);
+		case "getRecentDeployments":
+			return normalizeLimit(input);
+		default:
+			return input;
+	}
+}
+
+function normalizeSearchLogsInput(input: Record<string, unknown>) {
+	const normalized = normalizeLimit(input);
+	const level = normalizeLogLevel(normalized.level ?? normalized.severity);
+	if (level) {
+		normalized.level = level;
+	}
+	delete normalized.severity;
+	return normalized;
+}
+
+function normalizeGetMetricsInput(input: Record<string, unknown>) {
+	return {
+		...input,
+		metric: typeof input.metric === "string" ? normalizeMetricName(input.metric) : input.metric,
+	};
+}
+
+function normalizeLimit(input: Record<string, unknown>) {
+	const normalized = { ...input };
+	if (typeof normalized.limit === "string" && /^\d+$/.test(normalized.limit.trim())) {
+		normalized.limit = Number(normalized.limit.trim());
+	}
+	return normalized;
+}
+
+function normalizeMetricName(metric: string) {
+	const cleaned = metric.trim().toLowerCase();
+	const compact = cleaned.replace(/[\s._]+/g, "-");
+	const metricAliases: Record<string, (typeof allowedMetricNames)[number]> = {
+		"http-server-error-rate": "http.server.error_rate",
+		"error-rate": "http.server.error_rate",
+		"errorrate": "http.server.error_rate",
+		"5xx-rate": "http.server.error_rate",
+		"500-rate": "http.server.error_rate",
+		"http-server-p95-duration": "http.server.p95_duration",
+		"p95-duration": "http.server.p95_duration",
+		"p95-latency": "http.server.p95_duration",
+		"latency-p95": "http.server.p95_duration",
+		"duration-p95": "http.server.p95_duration",
+		"db-pool-active-connections": "db.pool.active_connections",
+		"db-pool-active-connection": "db.pool.active_connections",
+		"db-connections": "db.pool.active_connections",
+		"database-connections": "db.pool.active_connections",
+		"active-connections": "db.pool.active_connections",
+		"connection-pool": "db.pool.active_connections",
+	};
+	return metricAliases[compact] ?? metric;
+}
+
+function normalizeLogLevel(level: unknown) {
+	if (typeof level !== "string") return null;
+	const normalized = level.trim().toLowerCase();
+	return isLogLevel(normalized) ? normalized : null;
+}
+
+function parseInputObject(value: unknown) {
+	if (isRecord(value)) return value;
+	if (typeof value === "string") {
+		try {
+			const parsed: unknown = JSON.parse(value);
+			if (isRecord(parsed)) return parsed;
+		} catch {
+			return {};
+		}
+	}
+	return {};
 }
 
 function activityForTool(tool: ToolName) {
@@ -272,4 +357,12 @@ function optionalStrings(input: Record<string, unknown>, names: string[]) {
 
 function optionalNumber(input: Record<string, unknown>, name: string) {
 	return input[name] === undefined || (typeof input[name] === "number" && Number.isFinite(input[name]));
+}
+
+function optionalLogLevel(input: Record<string, unknown>, name: string) {
+	return input[name] === undefined || (typeof input[name] === "string" && isLogLevel(input[name]));
+}
+
+function isLogLevel(value: string): value is NonNullable<SearchLogsInput["level"]> {
+	return value === "debug" || value === "info" || value === "warn" || value === "error";
 }

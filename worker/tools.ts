@@ -19,6 +19,7 @@ export interface SearchLogsInput {
 	service?: string;
 	region?: string;
 	query?: string;
+	level?: LogEntry["level"];
 	start?: string;
 	end?: string;
 	limit?: number;
@@ -89,6 +90,12 @@ export const investigationTools: Array<{ name: ToolName; description: string }> 
 	{ name: "getTrace", description: "Fetch one distributed trace by ID." },
 ];
 
+export const allowedMetricNames = [
+	"http.server.error_rate",
+	"http.server.p95_duration",
+	"db.pool.active_connections",
+] as const;
+
 export function runInvestigationTool(
 	request: Extract<InvestigationToolRequest, { tool: "searchLogs" }>,
 ): SearchLogsResult;
@@ -128,6 +135,7 @@ function searchLogs(environment: SimulatedProductionEnvironment, input: SearchLo
 	const logs = environment.logs
 		.filter((log) => matchesOptional(log.service, input.service))
 		.filter((log) => matchesOptional(log.region, input.region))
+		.filter((log) => matchesOptional(log.level, input.level))
 		.filter((log) => !input.start || log.timestamp >= input.start)
 		.filter((log) => !input.end || log.timestamp <= input.end)
 		.filter((log) => queryTerms.every((term) => searchableLogText(log).includes(term)))

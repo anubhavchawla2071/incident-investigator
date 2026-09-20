@@ -42,6 +42,8 @@ describe("investigation model selection", () => {
 
 		const prompt = (run.mock.calls[0][1] as { messages: Array<{ content: string }> }).messages[1].content;
 		expect(prompt).toContain("serviceCatalog");
+		expect(prompt).toContain("availableMetrics");
+		expect(prompt).toContain("http.server.error_rate");
 		expect(prompt).toContain("completedToolResults");
 		expect(prompt).not.toContain("missing customerTier");
 	});

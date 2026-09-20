@@ -98,6 +98,64 @@ describe("investigation coordinator", () => {
 		expect(store.report?.outcome).toBe("inconclusive");
 		expect(store.report?.evidenceToolRunIds).toEqual(store.toolRuns.map((toolRun) => toolRun.id));
 	});
+
+	it("normalizes common Llama-style tool inputs before validation", async () => {
+		const store = new MemoryInvestigationStore("llama-incident", "The API is returning 500 errors.");
+		let calls = 0;
+		const model: InvestigationModel = {
+			decide: async () => {
+				calls += 1;
+				if (calls === 1) {
+					return {
+						kind: "tool",
+						request: {
+							tool: "getMetrics",
+							input: { service: "checkout-api", region: "us-east-1", metric: "error-rate" },
+						},
+					};
+				}
+				if (calls === 2) {
+					return {
+						kind: "tool",
+						request: {
+							tool: "searchLogs",
+							input: { service: "checkout-api", region: "us-east-1", severity: "ERROR", limit: "2" },
+						},
+					};
+				}
+				return {
+					kind: "report",
+					report: {
+						outcome: "inconclusive",
+						diagnosis: "The model gathered normalized metric and log evidence.",
+						rootCause: "More evidence is needed.",
+						confidence: 0.3,
+						suggestedNextSteps: ["Continue with traces and deployments."],
+						evidenceToolRunIds: store.toolRuns.map((toolRun) => toolRun.id),
+					},
+				};
+			},
+		};
+
+		const result = await runInvestigation({
+			incidentId: "llama-incident",
+			model,
+			store,
+			steps: directSteps,
+		});
+
+		expect(result.status).toBe("inconclusive");
+		expect(store.toolRuns[1]).toMatchObject({
+			toolName: "getMetrics",
+			input: { service: "checkout-api", region: "us-east-1", metric: "http.server.error_rate" },
+		});
+		expect(store.toolRuns[1].output).toMatchObject({ series: expect.arrayContaining([expect.objectContaining({ name: "http.server.error_rate" })]) });
+		expect(store.toolRuns[2]).toMatchObject({
+			toolName: "searchLogs",
+			input: { service: "checkout-api", region: "us-east-1", level: "error", limit: 2 },
+		});
+		expect(store.toolRuns[2].output).toMatchObject({ returned: 1 });
+	});
 });
 
 class MemoryInvestigationStore implements InvestigationStore {
