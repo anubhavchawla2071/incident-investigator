@@ -33,6 +33,13 @@
           "database_name": "incident-investigator",
           "database_id": "00000000-0000-0000-0000-000000000000"
         }
+      ],
+      "workflows": [
+        {
+          "name": "incident-investigation",
+          "binding": "INVESTIGATION_WORKFLOW",
+          "class_name": "IncidentInvestigationWorkflow"
+        }
       ]
     }
   }
