@@ -94,14 +94,14 @@ export class WorkersAiInvestigationModel implements InvestigationModel {
 
 const investigationSystemPrompt = `You are an incident investigator. Your only evidence is the user symptom, service catalog, and completed tool results supplied in this conversation. Never assume access to raw observability fixtures or undisclosed logs, metrics, traces, or deployments.
 
-Choose exactly one next investigation tool when more evidence is needed. Do not diagnose from one isolated signal. Gather corroborating evidence appropriate to the hypothesis, but do not use a fixed tool count. The orchestrator already starts every investigation with getServiceHealth and enforces the overall call limit. When finalReportRequired is true, do not call a tool; write the best supported final report from the completed evidence.
+Choose exactly one next investigation tool when more evidence is needed. You decide which evidence is relevant; there is no fixed investigation sequence. Do not diagnose from one isolated signal, but stop investigating as soon as the evidence supports a diagnosis. The orchestrator already starts every investigation with getServiceHealth and enforces the overall call limit.
 
 Investigation policy:
-- Keep the investigation focused on the user-reported service, region, and symptom. Do not jump to another degraded service from the health overview unless the symptom or prior tool evidence connects that service.
-- For checkout 500s, after checkout http.server.error_rate is confirmed, search checkout logs for errors before requesting more metrics.
+- Investigate the user's symptom, not every degraded service in the health overview.
+- If the user names a service or region, stay focused there unless completed evidence links another service or dependency.
+- Choose metrics only from availableMetricsByService for the selected service and region.
 - Call getTrace only with a traceId that appeared in completed tool results. Never invent trace IDs.
-- If logs or traces show an upstream service, you may inspect that upstream service's trace or recent deployments.
-- For getMetrics, use only metric names that are listed for that service and region in availableMetricsByService.
+- Do not repeat a tool call with the same input.
 
 When evidence is sufficient, return only a JSON object with this shape: {"outcome":"resolved"|"inconclusive","diagnosis":"string","rootCause":"string","confidence":number from 0 to 1,"suggestedNextSteps":["string"],"evidenceToolRunIds":["tool run id"]}. Cite only IDs from completed tool results. If evidence is insufficient, return outcome "inconclusive" instead of guessing.`;
 
@@ -156,10 +156,11 @@ function toModelContext({ symptom, toolRuns }: {
 	return {
 		reportedSymptom: symptom,
 		serviceCatalog,
+		degradedServiceHealth: degradedServiceHealth(toolRuns),
 		availableMetrics: allowedMetricNames,
 		availableMetricsByService,
 		completedToolResults: toolRuns
-			.filter((toolRun) => toolRun.status === "succeeded")
+			.filter((toolRun) => toolRun.status === "succeeded" && toolRun.toolName !== "getServiceHealth")
 			.map((toolRun) => ({
 				toolRunId: toolRun.id,
 				tool: toolRun.toolName,
@@ -167,6 +168,11 @@ function toModelContext({ symptom, toolRuns }: {
 				result: toolRun.output,
 			})),
 	};
+}
+
+function degradedServiceHealth(toolRuns: StoredToolRun[]) {
+	const output = toolRuns.find((toolRun) => toolRun.toolName === "getServiceHealth")?.output;
+	return isRecord(output) && Array.isArray(output.services) ? output.services : [];
 }
 
 const finalReportSystemPrompt = `You are writing the final report for an incident investigation. Use only the compact evidence summary and cite only IDs from evidenceToolRunIds. Do not call tools. Return only JSON matching reportSchema, with no markdown or extra text.`;

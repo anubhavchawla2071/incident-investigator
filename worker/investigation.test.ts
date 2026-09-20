@@ -175,97 +175,24 @@ describe("investigation coordinator", () => {
 		expect(store.toolRuns[2].output).toMatchObject({ returned: 1 });
 	});
 
-	it("keeps a checkout investigation focused when Llama wanders to unrelated or empty tools", async () => {
-		const store = new MemoryInvestigationStore("focused-incident", "Checkout API is returning 500 errors in us-east-1. Can you investigate what changed?");
-		let calls = 0;
-		let finalReportRequested = false;
-		const model: InvestigationModel = {
-			decide: async ({ finalReportRequired }) => {
-				if (finalReportRequired) finalReportRequested = true;
-				calls += 1;
-				if (calls === 1) {
-					return {
-						kind: "tool",
-						request: { tool: "getMetrics", input: { service: "checkout-api", region: "us-east-1", metric: "error-rate" } },
-					};
-				}
-				if (calls === 2) {
-					return {
-						kind: "tool",
-						request: { tool: "getMetrics", input: { service: "payments-service", region: "us-east-1", metric: "db.pool.active_connections" } },
-					};
-				}
-				if (calls === 3) {
-					return {
-						kind: "tool",
-						request: { tool: "getTrace", input: { traceId: "9638c880-bfd0-4b78-b33e-492818dc8736" } },
-					};
-				}
-				if (calls === 4) {
-					return {
-						kind: "tool",
-						request: { tool: "getMetrics", input: { service: "checkout-api", region: "us-east-1", metric: "db.pool.active_connections" } },
-					};
-				}
-				return {
-					kind: "report",
-					report: {
-						outcome: "resolved",
-						diagnosis: "Checkout 500s are tied to cart reservation failures after a cart deployment.",
-						rootCause: "cart-service changed the reservation contract while checkout still sends the old payload.",
-						confidence: 0.9,
-						suggestedNextSteps: ["Roll back or patch the cart-service deployment."],
-						evidenceToolRunIds: store.toolRuns.map((toolRun) => toolRun.id),
-					},
-				};
-			},
-		};
-
-		const result = await runInvestigation({
-			incidentId: "focused-incident",
-			model,
-			store,
-			steps: directSteps,
-		});
-
-		expect(result.status).toBe("resolved");
-		expect(store.toolRuns.map((toolRun) => [toolRun.toolName, toolRun.input])).toEqual([
-			["getServiceHealth", {}],
-			["getMetrics", { service: "checkout-api", region: "us-east-1", metric: "http.server.error_rate" }],
-			["searchLogs", { service: "checkout-api", region: "us-east-1", level: "error", limit: 10 }],
-			["getTrace", { traceId: "trace-checkout-500-01" }],
-			["getRecentDeployments", { service: "cart-service", region: "us-east-1", limit: 3 }],
-		]);
-		expect(JSON.stringify(store.toolRuns.slice(1).map((toolRun) => toolRun.output))).not.toContain("payments-service");
-		expect(JSON.stringify(store.toolRuns.map((toolRun) => toolRun.output))).not.toContain("9638c880");
-		expect(finalReportRequested).toBe(true);
-	});
-
-	it("keeps a payments investigation scoped to payments evidence", async () => {
+	it("rejects an unrelated service jump without choosing the next tool for the model", async () => {
 		const store = new MemoryInvestigationStore("payments-incident", "Payments are timing out during confirmation.");
 		let calls = 0;
 		const model: InvestigationModel = {
-			decide: async ({ finalReportRequired }) => {
-				if (finalReportRequired) {
-					return {
-						kind: "report",
-						report: {
-							outcome: "resolved",
-							diagnosis: "Payments are timing out while acquiring database connections.",
-							rootCause: "The payments primary database pool is exhausted.",
-							confidence: 0.9,
-							suggestedNextSteps: ["Roll back or mitigate the payments deployment."],
-							evidenceToolRunIds: store.toolRuns.map((toolRun) => toolRun.id),
-						},
-					};
-				}
+			decide: async () => {
 				calls += 1;
+				if (calls === 1) return { kind: "tool", request: { tool: "getMetrics", input: { service: "checkout-api", region: "us-east-1", metric: "http.server.error_rate" } } };
+				if (calls === 2) return { kind: "tool", request: { tool: "getMetrics", input: { service: "payments-service", region: "us-east-1", metric: "db.pool.active_connections" } } };
 				return {
-					kind: "tool",
-					request:
-						calls === 1
-							? { tool: "getMetrics", input: { service: "checkout-api", region: "us-east-1", metric: "http.server.error_rate" } }
-							: { tool: "searchLogs", input: { service: "checkout-api", region: "us-east-1", level: "error" } },
+					kind: "report",
+					report: {
+						outcome: "inconclusive",
+						diagnosis: "Payments database pressure is elevated, but more evidence is needed.",
+						rootCause: "Inconclusive.",
+						confidence: 0.4,
+						suggestedNextSteps: ["Inspect payments logs or traces."],
+						evidenceToolRunIds: store.toolRuns.map((toolRun) => toolRun.id),
+					},
 				};
 			},
 		};
@@ -277,14 +204,17 @@ describe("investigation coordinator", () => {
 			steps: directSteps,
 		});
 
-		expect(result.status).toBe("resolved");
-		expect(store.toolRuns.map((toolRun) => [toolRun.toolName, toolRun.input])).toEqual([
-			["getServiceHealth", {}],
-			["getMetrics", { service: "payments-service", region: "us-east-1", metric: "db.pool.active_connections" }],
-			["searchLogs", { service: "payments-service", region: "us-east-1", level: "error", limit: 10 }],
-			["getTrace", { traceId: "trace-payment-slow-01" }],
-			["getRecentDeployments", { service: "payments-service", region: "us-east-1", limit: 3 }],
-		]);
+		expect(result.status).toBe("inconclusive");
+		expect(store.toolRuns[1]).toMatchObject({
+			toolName: "getMetrics",
+			input: { service: "checkout-api", metric: "http.server.error_rate" },
+			output: { policy: expect.objectContaining({ status: "rejected", reason: expect.stringContaining("payments-service") }) },
+		});
+		expect(store.toolRuns[2]).toMatchObject({
+			toolName: "getMetrics",
+			input: { service: "payments-service", metric: "db.pool.active_connections" },
+			output: { series: expect.any(Array) },
+		});
 	});
 
 	it("records a controlled policy result when Llama invents a trace id before any trace id is observed", async () => {
