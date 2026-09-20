@@ -104,6 +104,7 @@ export function runInvestigationTool(
 export function runInvestigationTool(
 	request: Extract<InvestigationToolRequest, { tool: "getTrace" }>,
 ): GetTraceResult;
+export function runInvestigationTool(request: InvestigationToolRequest): InvestigationToolResult;
 export function runInvestigationTool(
 	request: InvestigationToolRequest,
 ): InvestigationToolResult {
