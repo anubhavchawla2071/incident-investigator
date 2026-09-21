@@ -1,86 +1,123 @@
 # Incident Investigator
 
-An AI-powered incident investigation demo built with React, TypeScript, Cloudflare Workers, D1, Workflows, and Workers AI.
+An AI-powered incident investigation console built for the Cloudflare take-home assignment.
+
+A user reports a symptom such as “Checkout API is returning 500 errors in us-east-1.” The application creates an incident, runs a bounded investigation against simulated production data, and returns a diagnosis with cited evidence.
+
+## Architecture
+
+| Concern | Implementation |
+| --- | --- |
+| User interface | React + TypeScript incident console |
+| API/runtime | Cloudflare Worker |
+| Coordination | Cloudflare Workflow (`IncidentInvestigationWorkflow`) |
+| Persistent state | Cloudflare D1 |
+| LLM | Workers AI, using Llama 3.3 in production |
+| Local/test model | Deterministic fixture model |
+| Observability | Deterministic JSON fixtures and a bounded tool layer |
+
+```text
+React UI
+   │ create incident / poll incident state
+   ▼
+Cloudflare Worker ──► D1 (incident, messages, tool runs, report)
+   │
+   ▼
+Cloudflare Workflow
+   │ initial health triage, tool validation, persistence
+   ▼
+Workers AI / Llama 3.3 ──► bounded observability tools ──► fixture data
+   │
+   ▼
+Structured report with cited tool-run IDs
+```
+
+The Worker creates the incident and starts the Workflow. The Workflow owns coordination and durable progress: it records the initial service-health check, persists every tool run, validates the model’s requests, and saves the final report. D1 holds application state; it is not used as a fake log warehouse.
+
+## How the investigation works
+
+The model never receives all logs, metrics, traces, or deployments at once. It receives only:
+
+- the user’s symptom;
+- a small service catalog and degraded-service health overview;
+- the available follow-up tool schemas and metrics for each service;
+- results from completed tool calls; and
+- controlled policy feedback when a request is invalid.
+
+The model decides what to inspect next. The server keeps that loop safe and bounded by validating tool inputs, normalizing harmless aliases, rejecting unavailable metrics, rejecting invented trace IDs and exact duplicate calls, applying an explicit user-service scope when relevant, and enforcing the six-call budget. The initial `getServiceHealth` call is workflow-owned triage; the model uses it to choose subsequent evidence.
+
+The simulated tools behave like small observability APIs:
+
+- `searchLogs` searches bounded log records.
+- `getMetrics` returns one metric series for a service and region.
+- `getTrace` fetches one observed trace ID.
+- `getRecentDeployments` lists recent deployments for a service/region.
+- `getServiceHealth` provides the workflow’s initial degraded-service overview.
+
+The fixtures contain clues, not a stored answer or scenario key. The final model call receives a compact evidence summary and the actual tool-run IDs it is allowed to cite, then returns `resolved` or `inconclusive`, a diagnosis, root cause, confidence, next steps, and cited evidence.
 
 ## Local development
 
 ```sh
 npm install
+npm run db:migrate:local
 npm run dev
 ```
 
-The React application is served by the Worker. `GET /api/health` confirms that the local Worker has its D1 binding available.
+Open the URL printed by Vite (normally `http://localhost:5173`). The local console uses the deterministic model, so it does not require Workers AI credentials.
 
-Workers AI runs remotely, so local development and tests use the deterministic fixture model without Cloudflare credentials. In the deployed production environment, the same investigation interface uses Workers AI Llama 3.3 with function calling. The model receives only the reported symptom, a small service catalog, the five tool schemas, and results from prior tool calls—never the complete fixture dataset.
-
-## Investigation API and Workflow
-
-Open the local app at `http://localhost:5173` to use the internal incident console. It lets you submit a symptom, shows the latest incident status and activity while it refreshes, displays each persisted tool call, and renders the final report. Example buttons only prefill the message; they never select fixture data.
-
-Create an investigation by sending only the observed symptom—there is no scenario or service selector:
+Useful local commands:
 
 ```sh
-curl -X POST http://localhost:5173/api/incidents \
-  -H 'content-type: application/json' \
-  -d '{"message":"The API is returning 500 errors. Can you investigate?"}'
-```
-
-The Worker creates the incident and its user message in D1, then starts `IncidentInvestigationWorkflow`. The Workflow always records a `getServiceHealth` run first. The local deterministic model sees only the symptom and results from completed tool runs, chooses subsequent tools, and is capped at six calls. Each tool input/result is saved in `tool_runs`; the final report includes its outcome, diagnosis, root cause, confidence, suggested next steps, and evidence tool-run IDs.
-
-Read the UI state for one incident with:
-
-```sh
-curl http://localhost:5173/api/incidents/<incident-id>
-```
-
-The report's `outcome` is either `resolved` or `inconclusive`. The incident status becomes `resolved` when the investigation has finished, including an inconclusive report; `current_activity` keeps the latest workflow activity for the future UI.
-
-## Local database
-
-Apply pending D1 migrations to the local database:
-
-```sh
-npm run db:migrate:local
-```
-
-Verify that the four application tables exist:
-
-```sh
+# Confirm the four D1 tables exist locally.
 npm run db:verify:local
-```
 
-## Simulated production data
-
-The Worker combines three JSON fixture files into one deterministic simulated production environment. They contain separate logs, metrics, traces, recent deployments, and service-health observations—never a stored root-cause field or a user-selectable scenario.
-
-The data includes clues for checkout 500s, payment failures caused by database connection pressure, and European order timeouts. It is internal observability data: the user only describes what they see, and the future LLM decides which tools to call.
-
-The investigation tool layer is in `worker/tools.ts`. It exposes five small operations that will later be supplied to the LLM:
-
-- `searchLogs` searches across the environment by service, region, query text, and time range.
-- `getMetrics` returns a requested metric series for a service and optional region.
-- `getServiceHealth` returns a compact degraded-service overview with no filters, or filtered health checks when a service or region is supplied.
-- `getRecentDeployments` returns recent deployments across the environment, newest first.
-- `getTrace` returns one trace by ID.
-
-Run the fixture and tool tests with:
-
-```sh
+# Run the test suite.
 npm test
+
+# Type-check and build the Worker/UI bundle.
+npm run build
 ```
 
-The test suite also covers the workflow coordinator's health-first happy path, inconclusive result, cross-incident evidence rejection, and six-tool-call limit.
+## Deployment
 
-## Before deployment
-
-Create a D1 database and replace both placeholder `database_id` values in `wrangler.jsonc` with the identifier returned by Wrangler:
+The committed `wrangler.jsonc` defines the D1, Workers AI, and Workflow bindings. Set up the database once, apply its production schema, then deploy:
 
 ```sh
+npx wrangler login
 npx wrangler d1 create incident-investigator
 ```
 
-Then deploy with:
+Copy the returned database ID into the `DB` database entry in both the top-level and `env.production` sections of `wrangler.jsonc`. Then run:
 
 ```sh
+npx wrangler d1 migrations apply incident-investigator --remote --env production
 npm run deploy
 ```
+
+`npm run deploy` builds the app and runs `wrangler deploy --env production`. Workers AI and the Workflow are bound through the configuration; no separate runtime code path is needed for deployment.
+
+## Demo prompts
+
+Try these in the incident console:
+
+- `Checkout API is returning 500 errors in us-east-1. Can you investigate what changed?`
+- `Payments are timing out during confirmation. Please investigate.`
+- `Orders are slow for customers in Europe. Can you find the likely cause?`
+
+The prompts do not select hidden fixtures or scenarios. They are ordinary user symptoms; the agent must choose the evidence it needs.
+
+## Limitations and next steps
+
+This is intentionally a focused take-home project:
+
+- Observability data is deterministic fixture data, not live telemetry.
+- LLM tool selection can vary between production runs, despite the bounded tools and guardrails.
+- There is no authentication, multi-user incident access control, alert ingestion, or human escalation workflow.
+- The UI polls for Workflow progress rather than streaming events.
+
+Next improvements would be adapters for real log/metric/trace providers, evaluation cases that score diagnosis quality, auth/RBAC, streaming progress updates, human approval for remediations, and richer incident timelines.
+
+## AI-assisted development
+
+The assignment was developed with AI assistance for architecture exploration, implementation, debugging, and documentation. The assignment-scoped prompt transcript is in [PROMPT_HISTORY.md](./PROMPT_HISTORY.md).
