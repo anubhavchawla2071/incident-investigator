@@ -83,6 +83,13 @@ describe("investigation coordinator", () => {
 	it("stops at six tool calls and asks the model for a final report", async () => {
 		const store = new MemoryInvestigationStore("limit-incident", "Customers report an unspecified issue.");
 		let finalReportRequested = false;
+		const followUpRequests = [
+			{ tool: "searchLogs", input: {} },
+			{ tool: "searchLogs", input: { query: "timeout" } },
+			{ tool: "getRecentDeployments", input: {} },
+			{ tool: "getServiceHealth", input: { service: "checkout-api" } },
+			{ tool: "getMetrics", input: { service: "checkout-api", region: "us-east-1", metric: "http.server.error_rate" } },
+		] as const;
 		const model: InvestigationModel = {
 			decide: async ({ finalReportRequired }) => {
 				if (finalReportRequired) {
@@ -99,7 +106,7 @@ describe("investigation coordinator", () => {
 						},
 					};
 				}
-				return { kind: "tool", request: { tool: "searchLogs", input: {} } };
+				return { kind: "tool", request: followUpRequests[store.toolRuns.length - 1] };
 			},
 		};
 
@@ -187,11 +194,11 @@ describe("investigation coordinator", () => {
 					kind: "report",
 					report: {
 						outcome: "inconclusive",
-						diagnosis: "Payments database pressure is elevated, but more evidence is needed.",
+						diagnosis: "Payments database pressure is elevated, but more valid evidence is needed.",
 						rootCause: "Inconclusive.",
 						confidence: 0.4,
 						suggestedNextSteps: ["Inspect payments logs or traces."],
-						evidenceToolRunIds: store.toolRuns.map((toolRun) => toolRun.id),
+						evidenceToolRunIds: usableToolRunIds(store.toolRuns),
 					},
 				};
 			},
@@ -230,11 +237,11 @@ describe("investigation coordinator", () => {
 					kind: "report",
 					report: {
 						outcome: "inconclusive",
-						diagnosis: "Trace lookup was rejected because no trace ID had been observed.",
+						diagnosis: "No valid trace was available to support a diagnosis.",
 						rootCause: "Inconclusive.",
 						confidence: 0.2,
 						suggestedNextSteps: ["Search logs first to find a real trace ID."],
-						evidenceToolRunIds: store.toolRuns.map((toolRun) => toolRun.id),
+						evidenceToolRunIds: usableToolRunIds(store.toolRuns),
 					},
 				};
 			},
@@ -273,7 +280,7 @@ describe("investigation coordinator", () => {
 						rootCause: "Inconclusive.",
 						confidence: 0.2,
 						suggestedNextSteps: ["Use the existing service health result."],
-						evidenceToolRunIds: store.toolRuns.map((toolRun) => toolRun.id),
+						evidenceToolRunIds: usableToolRunIds(store.toolRuns),
 					},
 				};
 			},
@@ -294,7 +301,39 @@ describe("investigation coordinator", () => {
 			output: { policy: expect.objectContaining({ status: "rejected", reason: expect.stringContaining("Duplicate") }) },
 		});
 	});
+
+	it("ends after repeated policy rejections without treating them as report evidence", async () => {
+		const store = new MemoryInvestigationStore("rejected-calls-incident", "Something is odd in production.");
+		let calls = 0;
+		const model: InvestigationModel = {
+			decide: async () => {
+				calls += 1;
+				if (calls <= 2) {
+					return { kind: "tool", request: { tool: "getTrace", input: { traceId: "made-up-trace" } } };
+				}
+				throw new Error("The investigation should stop after repeated rejected calls.");
+			},
+		};
+
+		const result = await runInvestigation({
+			incidentId: "rejected-calls-incident",
+			model,
+			store,
+			steps: directSteps,
+		});
+
+		expect(result.status).toBe("inconclusive");
+		expect(calls).toBe(2);
+		expect(store.toolRuns).toHaveLength(3);
+		expect(store.report?.evidenceToolRunIds).toEqual(["rejected-calls-incident:tool:1"]);
+	});
 });
+
+function usableToolRunIds(toolRuns: StoredToolRun[]) {
+	return toolRuns
+		.filter((toolRun) => !toolRun.output || !("policy" in toolRun.output))
+		.map((toolRun) => toolRun.id);
+}
 
 class MemoryInvestigationStore implements InvestigationStore {
 	readonly toolRuns: StoredToolRun[] = [];

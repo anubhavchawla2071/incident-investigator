@@ -37,7 +37,7 @@ describe("investigation model selection", () => {
 			request: { tool: "getMetrics", input: { service: "checkout-api", region: "us-east-1", metric: "http.server.error_rate" } },
 		});
 		expect(run).toHaveBeenCalledWith(INVESTIGATION_MODEL, expect.objectContaining({
-			tools: expect.arrayContaining([expect.objectContaining({ name: "getServiceHealth" })]),
+			tools: expect.not.arrayContaining([expect.objectContaining({ name: "getServiceHealth" })]),
 		}));
 
 		const prompt = (run.mock.calls[0][1] as { messages: Array<{ content: string }> }).messages[1].content;
@@ -49,6 +49,35 @@ describe("investigation model selection", () => {
 		expect(prompt).toContain("completedToolResults");
 		expect(prompt).toContain("checkout-api");
 		expect(prompt).not.toContain("missing customerTier");
+	});
+
+	it("guides the model from symptom metrics through logs, traces, and deployments", async () => {
+		const run = vi.fn().mockResolvedValue({
+			tool_calls: [{ name: "searchLogs", arguments: { service: "payments-service", region: "us-east-1", query: "connection" } }],
+		});
+		const model = createInvestigationModel({ run } as WorkersAiBinding);
+		const rejectedRun: StoredToolRun = {
+			id: "incident-1:tool:2",
+			incidentId: "incident-1",
+			toolName: "getTrace",
+			input: { traceId: "made-up-trace" },
+			output: { policy: { status: "rejected", reason: "Trace ID made-up-trace was rejected because it has not appeared in prior tool results." } },
+			status: "succeeded",
+		};
+
+		await model.decide({ symptom: "Payments are timing out.", toolRuns: [healthRun, rejectedRun] });
+
+		const request = run.mock.calls[0][1] as { messages: Array<{ content: string }> };
+		expect(request.messages[0].content).toContain("searchLogs for that same service and region");
+		expect(request.messages[0].content).toContain("getTrace using that observed ID");
+		expect(request.messages[0].content).toContain("recent deployments for the implicated service");
+
+		const context = JSON.parse(request.messages[1].content) as {
+			completedToolResults: Array<{ toolRunId: string }>;
+			policyFeedback: Array<{ toolRunId: string }>;
+		};
+		expect(context.completedToolResults).toEqual([]);
+		expect(context.policyFeedback).toEqual([expect.objectContaining({ toolRunId: "incident-1:tool:2" })]);
 	});
 
 	it("converts a structured Workers AI response into a final report", async () => {

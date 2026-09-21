@@ -37,7 +37,7 @@ export function createInvestigationModel(ai?: WorkersAiBinding): InvestigationMo
 }
 
 export class WorkersAiInvestigationModel implements InvestigationModel {
-	constructor(private readonly ai: WorkersAiBinding) {}
+	constructor(private readonly ai: WorkersAiBinding) { }
 
 	async decide(input: { symptom: string; toolRuns: StoredToolRun[]; finalReportRequired?: boolean }): Promise<ModelDecision> {
 		if (input.finalReportRequired) {
@@ -75,14 +75,24 @@ export class WorkersAiInvestigationModel implements InvestigationModel {
 		const request = finalReportRequest(evidence);
 
 		try {
-			return { kind: "report", report: parseReport((asResponse(await this.ai.run(INVESTIGATION_MODEL, request))).response) };
+			const rawResponse = await this.ai.run(INVESTIGATION_MODEL, request);
+
+			return {
+				kind: "report",
+				report: parseReport(asResponse(rawResponse).response),
+			};
 		} catch (error) {
 			if (!(error instanceof InvalidReportJsonError)) throw error;
 		}
 
 		try {
 			const retryRequest = finalReportRequest(evidence, "Previous response was not valid JSON. Return only corrected JSON matching the required schema.");
-			return { kind: "report", report: parseReport((asResponse(await this.ai.run(INVESTIGATION_MODEL, retryRequest))).response) };
+			const rawResponse = await this.ai.run(INVESTIGATION_MODEL, retryRequest);
+
+			return {
+				kind: "report",
+				report: parseReport(asResponse(rawResponse).response),
+			};
 		} catch (error) {
 			if (error instanceof InvalidReportJsonError) {
 				throw new Error("Workers AI final report was not valid JSON after one retry.");
@@ -94,7 +104,7 @@ export class WorkersAiInvestigationModel implements InvestigationModel {
 
 const investigationSystemPrompt = `You are an incident investigator. Your only evidence is the user symptom, service catalog, and completed tool results supplied in this conversation. Never assume access to raw observability fixtures or undisclosed logs, metrics, traces, or deployments.
 
-Choose exactly one next investigation tool when more evidence is needed. You decide which evidence is relevant; there is no fixed investigation sequence. Do not diagnose from one isolated signal, but stop investigating as soon as the evidence supports a diagnosis. The orchestrator already starts every investigation with getServiceHealth and enforces the overall call limit.
+Choose exactly one next investigation tool when more evidence is needed. You decide which evidence is relevant; there is no fixed investigation sequence. Do not diagnose from one isolated signal, but stop investigating as soon as the evidence supports a diagnosis. The orchestrator already starts every investigation with getServiceHealth and provides its result to you. You must use that result as initial triage and must not attempt to call getServiceHealth yourself.
 
 Investigation policy:
 - Investigate the user's symptom, not every degraded service in the health overview.
@@ -102,6 +112,10 @@ Investigation policy:
 - Choose metrics only from availableMetricsByService for the selected service and region.
 - Call getTrace only with a traceId that appeared in completed tool results. Never invent trace IDs.
 - Do not repeat a tool call with the same input.
+- Treat service health as triage and a metric as symptom confirmation, not a root-cause diagnosis. When a metric confirms the symptom, the next call should usually be searchLogs for that same service and region.
+- If matching logs contain a traceId, the next call should usually be getTrace using that observed ID. If logs or a trace identify an upstream, peer, or dependency, inspect that implicated service only when the completed evidence links it to the symptom.
+- After a trace identifies the failure mechanism, check recent deployments for the implicated service before resolving the incident. Do not finalize from health plus a metric alone unless the user explicitly asked only for a quick status check.
+- Policy feedback means a requested call was rejected and produced no incident evidence. Choose a different compliant call; never cite policy feedback as evidence or repeat it.
 
 When evidence is sufficient, return only a JSON object with this shape: {"outcome":"resolved"|"inconclusive","diagnosis":"string","rootCause":"string","confidence":number from 0 to 1,"suggestedNextSteps":["string"],"evidenceToolRunIds":["tool run id"]}. Cite only IDs from completed tool results. If evidence is insufficient, return outcome "inconclusive" instead of guessing.`;
 
@@ -129,11 +143,6 @@ const investigationToolSchemas: ToolDefinition[] = [
 		}, ["service", "metric"]),
 	},
 	{
-		name: "getServiceHealth",
-		description: "Return degraded services when no filters are supplied, or health for a specific service or region.",
-		parameters: objectSchema({ service: stringSchema("Service name from the catalog."), region: stringSchema("Cloud region.") }),
-	},
-	{
 		name: "getRecentDeployments",
 		description: "List recent deployments for an optional service and region.",
 		parameters: objectSchema({
@@ -153,20 +162,27 @@ function toModelContext({ symptom, toolRuns }: {
 	symptom: string;
 	toolRuns: StoredToolRun[];
 }) {
+	const completedToolRuns = usableToolRuns(toolRuns);
 	return {
 		reportedSymptom: symptom,
 		serviceCatalog,
 		degradedServiceHealth: degradedServiceHealth(toolRuns),
 		availableMetrics: allowedMetricNames,
 		availableMetricsByService,
-		completedToolResults: toolRuns
-			.filter((toolRun) => toolRun.status === "succeeded" && toolRun.toolName !== "getServiceHealth")
+		completedToolResults: completedToolRuns
+			.filter((toolRun) => toolRun.toolName !== "getServiceHealth")
 			.map((toolRun) => ({
 				toolRunId: toolRun.id,
 				tool: toolRun.toolName,
 				input: toolRun.input,
 				result: toolRun.output,
 			})),
+		policyFeedback: rejectedToolRuns(toolRuns).map((toolRun) => ({
+			toolRunId: toolRun.id,
+			tool: toolRun.toolName,
+			input: toolRun.input,
+			reason: policyReason(toolRun.output),
+		})),
 	};
 }
 
@@ -189,7 +205,7 @@ function finalReportRequest(evidence: ReturnType<typeof toFinalReportContext>, c
 }
 
 function toFinalReportContext(toolRuns: StoredToolRun[]) {
-	const completedRuns = toolRuns.filter((toolRun) => toolRun.status === "succeeded" && toolRun.output);
+	const completedRuns = usableToolRuns(toolRuns);
 	return {
 		evidenceSummary: completedRuns.map(summarizeEvidence).filter((summary): summary is string => Boolean(summary)),
 		evidenceToolRunIds: completedRuns.map((toolRun) => toolRun.id),
@@ -202,6 +218,19 @@ function toFinalReportContext(toolRuns: StoredToolRun[]) {
 			evidenceToolRunIds: ["tool run id"],
 		},
 	};
+}
+
+function usableToolRuns(toolRuns: StoredToolRun[]) {
+	return toolRuns.filter((toolRun) => toolRun.status === "succeeded" && toolRun.output && !isPolicyResult(toolRun.output));
+}
+
+function rejectedToolRuns(toolRuns: StoredToolRun[]) {
+	return toolRuns.filter((toolRun) => toolRun.status === "succeeded" && toolRun.output && isPolicyResult(toolRun.output));
+}
+
+function policyReason(output: StoredToolRun["output"]) {
+	if (!isPolicyResult(output)) return "";
+	return typeof output.policy.reason === "string" ? output.policy.reason : "The requested tool call was rejected.";
 }
 
 function summarizeEvidence(toolRun: StoredToolRun): string | null {
@@ -256,11 +285,27 @@ function parseReport(response: unknown): InvestigationReportDraft {
 }
 
 function parseJsonObject(value: string): unknown {
-	try {
-		return JSON.parse(value);
-	} catch {
-		throw new InvalidReportJsonError();
-	}
+    const trimmed = value.trim();
+
+    // Normal JSON
+    try {
+        return JSON.parse(trimmed);
+    } catch {
+        // Continue below.
+    }
+
+    // JSON wrapped in ```json ... ``` or ``` ... ```
+    const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+
+    if (fenced?.[1]) {
+        try {
+            return JSON.parse(fenced[1].trim());
+        } catch {
+            // Continue to the final error.
+        }
+    }
+
+    throw new InvalidReportJsonError();
 }
 
 class InvalidReportJsonError extends Error {
@@ -286,6 +331,10 @@ function stringSchema(description: string) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isPolicyResult(value: unknown): value is { policy: { status: string; reason?: unknown } } {
+	return isRecord(value) && isRecord(value.policy) && value.policy.status === "rejected";
 }
 
 function isReportOutcome(value: unknown): value is InvestigationReportDraft["outcome"] {

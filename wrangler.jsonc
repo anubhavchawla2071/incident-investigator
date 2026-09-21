@@ -1,50 +1,58 @@
 {
-  "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "incident-investigator",
-  "main": "./worker/index.ts",
-  "compatibility_date": "2026-09-20",
-  "compatibility_flags": ["nodejs_compat"],
-  "assets": {
-    "not_found_handling": "single-page-application"
-  },
-  "ai": {
-    "binding": "AI",
-    "remote": true
-  },
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "incident-investigator",
-      "database_id": "8fc16444-232e-4a86-8c35-986017242386"
-    }
-  ],
-  "workflows": [
-    {
-      "name": "incident-investigation",
-      "binding": "INVESTIGATION_WORKFLOW",
-      "class_name": "IncidentInvestigationWorkflow"
-    }
-  ],
-  "env": {
-    "production": {
-      "ai": {
-        "binding": "AI",
-        "remote": true
-      },
-      "d1_databases": [
-        {
-          "binding": "DB",
-          "database_name": "incident-investigator",
-          "database_id": "8fc16444-232e-4a86-8c35-986017242386"
-        }
-      ],
-      "workflows": [
-        {
-          "name": "incident-investigation",
-          "binding": "INVESTIGATION_WORKFLOW",
-          "class_name": "IncidentInvestigationWorkflow"
-        }
-      ]
-    }
-  }
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "incident-investigator",
+	"main": "./worker/index.ts",
+	"compatibility_date": "2026-09-20",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"assets": {
+		"not_found_handling": "single-page-application"
+	},
+	"ai": {
+		"binding": "AI",
+		"remote": true
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "incident-investigator",
+			"database_id": "527241ad-8629-4ad1-ba29-f9163a9bf39b"
+		},
+		{
+			"binding": "incident_investigator",
+			"database_name": "incident-investigator",
+			"database_id": "527241ad-8629-4ad1-ba29-f9163a9bf39b",
+			"remote": true
+		}
+	],
+	"workflows": [
+		{
+			"name": "incident-investigation",
+			"binding": "INVESTIGATION_WORKFLOW",
+			"class_name": "IncidentInvestigationWorkflow"
+		}
+	],
+	"env": {
+		"production": {
+			"ai": {
+				"binding": "AI",
+				"remote": true
+			},
+			"d1_databases": [
+				{
+					"binding": "DB",
+					"database_name": "incident-investigator",
+					"database_id": "527241ad-8629-4ad1-ba29-f9163a9bf39b"
+				}
+			],
+			"workflows": [
+				{
+					"name": "incident-investigation",
+					"binding": "INVESTIGATION_WORKFLOW",
+					"class_name": "IncidentInvestigationWorkflow"
+				}
+			]
+		}
+	}
 }

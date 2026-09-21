@@ -75,6 +75,7 @@ export interface InvestigationResult {
 type RunnableToolRequest = InvestigationToolRequest & { policyResult?: InvestigationToolResult };
 
 const MAX_TOOL_CALLS = 6;
+const MAX_POLICY_REJECTIONS = 2;
 
 export async function runInvestigation({
 	incidentId,
@@ -103,7 +104,14 @@ export async function runInvestigation({
 
 		while (true) {
 			const toolRuns = await store.listToolRuns(incidentId);
-			if (toolRuns.length >= MAX_TOOL_CALLS) {
+			if (policyRejectedToolRuns(toolRuns).length >= MAX_POLICY_REJECTIONS) {
+				const report = await steps.do("write report after repeated rejected calls", () =>
+					coordinator.finalize(createPolicyRejectionReport(toolRuns)),
+				);
+				return { status: report.outcome, report };
+			}
+
+			if (usableToolRuns(toolRuns).length >= MAX_TOOL_CALLS) {
 				const finalDecision = await steps.do("write report from collected evidence", () =>
 					model.decide({ symptom, toolRuns, finalReportRequired: true }),
 				);
@@ -180,7 +188,7 @@ class InvestigationCoordinator {
 		validateReportDraft(draft);
 		const toolRuns = await this.store.listToolRuns(this.incidentId);
 		const successfulRunIds = new Set(
-			toolRuns.filter((toolRun) => toolRun.status === "succeeded").map((toolRun) => toolRun.id),
+			usableToolRuns(toolRuns).map((toolRun) => toolRun.id),
 		);
 
 		for (const evidenceId of draft.evidenceToolRunIds) {
@@ -204,13 +212,26 @@ class InvestigationCoordinator {
 }
 
 function createLimitReport(toolRuns: StoredToolRun[]): InvestigationReportDraft {
+	const evidenceToolRunIds = usableToolRuns(toolRuns).map((toolRun) => toolRun.id);
 	return {
 		outcome: "inconclusive",
 		diagnosis: "The investigation reached its tool-call limit before finding a supported diagnosis.",
 		rootCause: "Inconclusive after the bounded investigation.",
 		confidence: 0.2,
 		suggestedNextSteps: ["Review the collected evidence and continue with a fresh investigation."],
-		evidenceToolRunIds: toolRuns.map((toolRun) => toolRun.id),
+		evidenceToolRunIds,
+	};
+}
+
+function createPolicyRejectionReport(toolRuns: StoredToolRun[]): InvestigationReportDraft {
+	const evidenceToolRunIds = usableToolRuns(toolRuns).map((toolRun) => toolRun.id);
+	return {
+		outcome: "inconclusive",
+		diagnosis: "The investigation could not collect enough valid follow-up evidence after repeated rejected tool calls.",
+		rootCause: "Inconclusive because the requested follow-up checks did not run successfully.",
+		confidence: 0.2,
+		suggestedNextSteps: ["Start a new investigation with the affected service, region, timestamp, or a trace ID from logs."],
+		evidenceToolRunIds,
 	};
 }
 
@@ -384,6 +405,14 @@ function observedTraceIds(toolRuns: StoredToolRun[]) {
 
 function isPolicyResult(value: unknown) {
 	return isRecord(value) && isRecord(value.policy) && value.policy.status === "rejected";
+}
+
+function usableToolRuns(toolRuns: StoredToolRun[]) {
+	return toolRuns.filter((toolRun) => toolRun.status === "succeeded" && toolRun.output && !isPolicyResult(toolRun.output));
+}
+
+function policyRejectedToolRuns(toolRuns: StoredToolRun[]) {
+	return toolRuns.filter((toolRun) => toolRun.status === "succeeded" && toolRun.output && isPolicyResult(toolRun.output));
 }
 
 function parseToolRequest(value: unknown): InvestigationToolRequest {
