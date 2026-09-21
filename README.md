@@ -4,6 +4,8 @@ An AI-powered incident investigation console built for the Cloudflare take-home 
 
 A user reports a symptom such as “Checkout API is returning 500 errors in us-east-1.” The application creates an incident, runs a bounded investigation against simulated production data, and returns a diagnosis with cited evidence.
 
+**Live demo:** [incident-investigator.anubhav-cloudflare-investigator.workers.dev](https://incident-investigator.anubhav-cloudflare-investigator.workers.dev/)
+
 ## Architecture
 
 | Concern | Implementation |
